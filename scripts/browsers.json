@@ -1,0 +1,8 @@
+{
+  "chrome_only_keys": ["minimum_chrome_version"],
+  "browsers": {
+    "chrome": {
+      "background": { "service_worker": "background/background.js", "type": "module" }
+    }
+  }
+}

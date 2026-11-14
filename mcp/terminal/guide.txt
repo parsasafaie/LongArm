@@ -1,0 +1,15 @@
+Terminal — run shell commands on the user's own computer.
+
+Use: when the task needs the machine itself — files, builds, processes, installed programs, anything
+a command line does. Prefer running a command over guessing what the answer would be.
+
+Rules:
+- One command at a time; read its output before deciding the next one.
+- There is no keyboard: pass the flags that avoid prompts (-y, --yes, -p), and never ask the user to
+  type into a command.
+- To leave something running, background it: `nohup ... &` (Linux/macOS), `start /b ...` (Windows).
+- A non-zero exit code is an answer, not a failure: read stderr and decide.
+- A refused command means the user said no; do not rewrite it to get it through.
+- Long output keeps the first and the last part, with "... [N characters omitted] ..." in between.
+
+Example: {"mcp_call":{"server":"terminal","name":"run_command","arguments":{"command":"df -h /"}}}

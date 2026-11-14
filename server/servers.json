@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "terminal",
+      "server_path": "mcp/terminal/mcp_server.py",
+      "guide_path": "mcp/terminal/guide.txt",
+      "port": 8875,
+      "cwd": ".."
+    }
+  ],
+  "control_port": 8099
+}

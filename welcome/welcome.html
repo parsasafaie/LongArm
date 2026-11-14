@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to LongArm</title>
+  <link rel="stylesheet" href="welcome.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="title-row">
+        <img class="logo" src="../icons/icon128.png" alt="" width="52" height="52">
+        <h1>Welcome to LongArm</h1>
+      </div>
+      <p class="lead">Connects ChatGPT, Claude, Gemini and DeepSeek with your local tools (MCP). Just follow these steps; the guide updates itself as you make progress.</p>
+    </header>
+
+    <ol class="steps">
+      <li id="step-launcher" class="step" data-state="current">
+        <span class="badge">1</span>
+        <div class="body">
+          <h2>Install the launcher <small id="launcher-status" class="status"></small></h2>
+          <p>A browser cannot start programs on its own. The launcher is a small process that is installed <strong>only once</strong>, starts with your session and lets you turn the bridge on, off and restart it from this extension.</p>
+          <div id="launcher-help">
+            <div class="os-win">
+              <ol class="how">
+                <li>Open the extension folder and go into <code>server</code>.</li>
+                <li>Double-click <code>install.cmd</code> and wait until it says &laquo;Done&raquo;.</li>
+              </ol>
+            </div>
+            <div class="os-unix">
+              <ol class="how">
+                <li>Open a terminal inside the extension folder.</li>
+                <li>Run <code>bash server/install.sh</code> once &mdash; it installs what is missing and registers the automatic start.</li>
+              </ol>
+            </div>
+            <p class="muted">Prefer the terminal? <code id="cmd-text">python server/install_service.py</code> <button id="copy-cmd" type="button" class="link">Copy</button></p>
+          </div>
+        </div>
+      </li>
+
+      <li id="step-bridge" class="step" data-state="pending">
+        <span class="badge">2</span>
+        <div class="body">
+          <h2>Turn on the bridge <small id="bridge-status" class="status"></small></h2>
+          <p>The bridge is the program that publishes your MCP servers. You can control it from here or from the extension menu in the toolbar.</p>
+          <div class="actions">
+            <button id="btn-start" type="button">Start</button>
+            <button id="btn-restart" type="button" class="soft">Restart</button>
+            <button id="btn-stop" type="button" class="soft">Stop</button>
+          </div>
+          <p id="bridge-msg" class="msg" hidden></p>
+        </div>
+      </li>
+
+      <li id="step-servers" class="step" data-state="pending">
+        <span class="badge">3</span>
+        <div class="body">
+          <h2>Your MCP servers <small id="servers-status" class="status"></small></h2>
+          <p>They come from <code>server/servers.json</code> — the <strong>terminal</strong> server ships registered. Add an entry (<code>name</code>, <code>server_path</code>, <code>guide_path</code>, <code>port</code>) and save; it appears here within seconds. Turn on the ones you want and choose their permission. There is no hard limit, but keeping few active costs fewer tokens (one is recommended).</p>
+          <ul id="server-list" class="servers"></ul>
+          <div class="actions"><button id="btn-config" type="button" class="soft">Edit servers.json</button></div>
+        </div>
+      </li>
+
+      <li id="step-ready" class="step" data-state="pending">
+        <span class="badge">4</span>
+        <div class="body">
+          <h2>Try it in your favourite chat</h2>
+          <p>Copy the rules below and paste them into a <strong>Project</strong> (ChatGPT, Claude) or a <strong>Skill</strong> (Gemini) — in a Project, start the chat inside it; in Gemini, pick the skill with <code>/</code> in any chat. Then open your chat with a button. <span class="muted">They are generated from the extension, so this text is always the one it expects. DeepSeek has no place for them: see <code>instructions/README.md</code>.</span></p>
+          <div class="instructions">
+            <pre id="instructions-text">Loading…</pre>
+            <div class="actions">
+              <button id="copy-instructions" type="button" disabled>Copy the instructions</button>
+            </div>
+          </div>
+          <div class="actions">
+            <a class="btn soft" href="https://chatgpt.com/" target="_blank" rel="noopener">ChatGPT</a>
+            <a class="btn soft" href="https://claude.ai/" target="_blank" rel="noopener">Claude</a>
+            <a class="btn soft" href="https://gemini.google.com/" target="_blank" rel="noopener">Gemini</a>
+            <a class="btn soft" href="https://chat.deepseek.com/" target="_blank" rel="noopener">DeepSeek</a>
+          </div>
+        </div>
+      </li>
+    </ol>
+  </main>
+  <script src="welcome.js"></script>
+</body>
+</html>

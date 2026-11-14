@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>LongArm</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Side rail: navigation and the master switch -->
+    <aside class="rail">
+      <div class="brand" title="LongArm">
+        <img class="brand-mark" src="../icons/icon48.png" alt="" aria-hidden="true">
+        <span id="version" class="version"></span>
+      </div>
+
+      <nav class="rail-nav" role="tablist" aria-label="Sections">
+        <button type="button" role="tab" data-tab="servers" aria-selected="true" title="Your MCP servers">
+          <i class="ico" data-ico="grid"></i><span>Servers</span>
+        </button>
+        <button type="button" role="tab" data-tab="history" aria-selected="false" title="What the AI has run">
+          <i class="ico" data-ico="clock"></i><span>Activity</span>
+        </button>
+        <button type="button" role="tab" data-tab="settings" aria-selected="false" title="Settings">
+          <i class="ico" data-ico="sliders"></i><span>Settings</span>
+        </button>
+      </nav>
+
+      <div class="rail-foot">
+        <label class="switch tiny" title="Turn the whole bridge on or off">
+          <input type="checkbox" id="master" aria-label="Enable bridge">
+          <span></span>
+        </label>
+        <small id="master-label" class="rail-state">Bridge</small>
+      </div>
+    </aside>
+
+    <main id="main" class="pane">
+      <!-- Servers -->
+      <section id="tab-servers">
+        <header class="page-head">
+          <div class="grow">
+            <h1>Servers</h1>
+            <p class="page-sub"><strong id="counter">0 active</strong><span id="tokens"></span></p>
+          </div>
+          <div class="head-actions">
+            <button id="toggle-bridge" type="button" class="soft" disabled><i class="ico" data-ico="power"></i><span>Start</span></button>
+            <button id="restart-bridge" type="button" class="icon-btn" aria-label="Restart the bridge" title="Restart the bridge"><i class="ico" data-ico="refresh"></i></button>
+            <button id="open-config" type="button" class="icon-btn" aria-label="Edit servers.json" title="Edit servers.json"><i class="ico" data-ico="file"></i></button>
+          </div>
+        </header>
+
+        <div class="hero">
+          <i id="bridge-dot" class="dot"></i>
+          <div class="grow">
+            <strong id="bridge-title">Checking the bridge…</strong>
+            <small id="bridge-sub" class="muted"></small>
+          </div>
+        </div>
+        <p id="config-error" class="callout bad" hidden></p>
+        <p id="offline-hint" class="callout warn" hidden></p>
+
+        <div class="perm-all card">
+          <strong>Default permission</strong>
+          <div id="perm-all" class="seg" role="radiogroup" aria-label="Permission for all MCPs"></div>
+          <small id="perm-hint" class="muted"></small>
+        </div>
+
+        <p id="warning" class="callout warn" hidden></p>
+        <ul id="server-list" class="server-list"></ul>
+        <div id="empty" class="empty" hidden>
+          <p>No server yet. Start the bridge: the servers registered in <code>server/servers.json</code> appear here on their own. Add an entry to that file and save — no restart needed.</p>
+        </div>
+      </section>
+
+      <!-- Activity -->
+      <section id="tab-history" hidden>
+        <header class="page-head">
+          <div class="grow">
+            <h1>Activity</h1>
+            <p class="page-sub"><span id="history-count" class="muted"></span></p>
+          </div>
+          <div class="head-actions">
+            <button id="clear-history" type="button" class="soft small">Clear</button>
+          </div>
+        </header>
+        <ol id="history-list" class="timeline"></ol>
+        <p id="history-empty" class="empty" hidden>No tool has been run yet. Ask the AI something that needs one.</p>
+      </section>
+
+      <!-- Settings -->
+      <section id="tab-settings" hidden>
+        <header class="page-head">
+          <div class="grow">
+            <h1>Settings</h1>
+            <p class="page-sub"><span class="muted">Everything can be changed again at any time.</span></p>
+          </div>
+          <div class="head-actions">
+            <button id="copy-diagnostics" type="button" class="soft small" title="Copies the state of the extension, the bridge and the recent calls as JSON — for a bug report"><i class="ico" data-ico="file"></i><span>Copy diagnostics</span></button>
+          </div>
+        </header>
+
+        <div class="sec">
+          <h2 class="sec-title">Servers</h2>
+          <label class="opt">
+            <span class="switch"><input type="checkbox" id="set-autoEnableDiscovered"><span></span></span>
+            <span class="opt-txt">
+              <strong>Enable discovered servers</strong>
+              <small>If this is off, only the first server is enabled when none is; fewer active servers means fewer tokens in every chat.</small>
+            </span>
+          </label>
+          <div class="sec-actions">
+            <button type="button" id="discover-now" class="soft small"><i class="ico" data-ico="refresh"></i><span>Scan now</span></button>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h2 class="sec-title">The chat</h2>
+          <p class="sec-note">The instructions live in the Project / Skill you installed — the extension never writes them into a chat. See <code>instructions/</code> in the project.</p>
+          <label class="opt">
+            <span class="switch"><input type="checkbox" id="set-autoSend"><span></span></span>
+            <span class="opt-txt">
+              <strong>Send results automatically</strong>
+              <small>If this is off, the result is typed into the chat and you send it yourself.</small>
+            </span>
+          </label>
+          <label class="opt">
+            <span class="switch"><input type="checkbox" id="set-hideProtocol"><span></span></span>
+            <span class="opt-txt">
+              <strong>Keep the chat clean</strong>
+              <small>Everything the bridge types into the chat — the tool results, the tool list the AI asks for, and the notices (a wrong name, an unreadable call) — is kept out of sight, and so is the mcp_call message the AI sends for each tool. The AI still receives all of it; turn this off to see them too.</small>
+            </span>
+          </label>
+          <label class="opt">
+            <span class="switch"><input type="checkbox" id="set-focusFallback"><span></span></span>
+            <span class="opt-txt">
+              <strong>Wake the tab if it gets stuck</strong>
+              <small>If the chat does not accept a result while the tab is hidden, it is brought to the front for a moment and then the previous tab is restored.</small>
+            </span>
+          </label>
+        </div>
+
+        <div class="sec">
+          <h2 class="sec-title">Limits</h2>
+          <label class="opt">
+            <span class="opt-txt">
+              <strong>Maximum characters per result</strong>
+              <small>Nothing is trimmed: anything over this limit is attached to the chat in full as a file, and the message keeps an excerpt.</small>
+            </span>
+            <input type="number" id="set-maxResultChars" min="500" max="100000" step="500">
+          </label>
+        </div>
+
+        <p class="about"><span id="version-line"></span></p>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
