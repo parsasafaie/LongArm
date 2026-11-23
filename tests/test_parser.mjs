@@ -28,6 +28,13 @@ assert.equal(call.arguments.script, String.raw`type C:\new\text.txt`);
 call = one(String.raw`{"mcp_call":{"server":"windows_management","name":"execute_powershell","arguments":{"script":"dir C:\\new\\test.txt"}}}`);
 assert.equal(call.arguments.script, String.raw`dir C:\new\test.txt`);
 
+// 2c) A drive path and a valid escaped quote/newline in the SAME string: the path keeps its separator and
+// the escapes keep their meaning (the old pre-pass doubled every backslash, breaking `\"` and `\n`).
+call = one(String.raw`{"mcp_call":{"server":"windows_management","name":"execute_powershell","arguments":{"script":"cd C:\Users && echo \"hello\""}}}`);
+assert.equal(call.arguments.script, String.raw`cd C:\Users && echo "hello"`);
+call = one(String.raw`{"mcp_call":{"server":"windows_management","name":"execute_powershell","arguments":{"script":"cd C:\Users && echo a\nb"}}}`);
+assert.equal(call.arguments.script, 'cd C:\\Users && echo a\nb');
+
 // 3) Real line break inside a text
 call = one('{"mcp_call":{"server":"windows_management","name":"execute_powershell","arguments":{"script":"$a=1\n$b=2"}}}');
 assert.equal(call.arguments.script, '$a=1\n$b=2');
@@ -69,5 +76,25 @@ assert.equal(WMB.looksMalformed('To call a tool, send {"mcp_call":{"server":"<se
 assert.equal(WMB.looksMalformed('Format: {"mcp_call":{"name":"tool_name"}} — replace tool_name with a real tool.'), false);
 // …while a REAL attempt with a broken block (an identifier name) still warns.
 assert.equal(WMB.looksMalformed('{"mcp_call":{"name":"ptz_move","arguments":{"direction":"LEFT"'), true);
+
+// 11) Mixed batch: one valid block must not swallow its sibling. A repairable sibling runs; a cut-off one
+// produces a format warning instead of disappearing silently.
+const okBlock = '{"mcp_call":{"server":"v380_camara","name":"ptz_move","arguments":{"direction":"LEFT"}}}';
+const repairable = '{"mcp_call":{"server":"v380_camara","name":"ptz_move","arguments":{"direction":"RIGHT" "duration":2}}}';
+const mixed = `${okBlock}\n${repairable}`;
+assert.equal(WMB.extractMcpCalls(mixed).length, 2, 'a repairable sibling of a valid call is read and kept');
+assert.equal(WMB.looksMalformed(mixed), false, 'nothing is left unreadable in that batch');
+
+const cutSibling = '{"mcp_call":{"server":"v380_camara","name":"ptz_move","arguments":{"direction":"UP"';
+const mixedCut = `${okBlock}\n${cutSibling}`;
+assert.equal(WMB.extractMcpCalls(mixedCut).length, 1, 'the valid call is still extracted');
+assert.equal(WMB.looksMalformed(mixedCut), true, 'the cut-off sibling counts as malformed intent');
+assert.equal(WMB.malformedCallBlocks(mixedCut).length, 1, 'exactly the broken block is reported');
+
+// 12) A format_error must not tell the AI that NOTHING in the message ran: readable siblings may have.
+const errorText = WMB.formatCallError(cut);
+assert.match(errorText, /This block was not executed/, 'the error is scoped to the block');
+assert.match(errorText, /may already have run/i, 'and warns that readable siblings may have run');
+assert.ok(!/^Nothing was run:/m.test(errorText), 'the old whole-message claim is gone');
 
 console.log('ok test_parser: all checks passed');

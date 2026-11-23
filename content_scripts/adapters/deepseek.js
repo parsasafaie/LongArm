@@ -11,8 +11,9 @@
  *   - There is no stable ID per message.
  *
  * Anti-loop (the same result used to be sent over and over):
- *   1. Call ID by CONTENT (conversation + how many earlier messages carry the same call), not by the
- *      message position: if DeepSeek repaints or changes the number of `.ds-markdown` blocks, the call is not "renewed".
+ *   1. Call ID by CONTENT (how many earlier messages carry the same call; the ledger scopes it by conversation),
+ *      not by the message position: if DeepSeek repaints or changes the number of `.ds-markdown` blocks, the call
+ *      is not "renewed". The id also stays the same across a reload, so a pending call can be resumed.
  *   2. Lock: after running a call, another IDENTICAL one is ignored until the result is sent and the AI replies
  *      again.
  *   3. Safe send: "send" is not pressed if a generation is in progress, nor if the box is already empty (it already went out).
@@ -32,7 +33,6 @@
   const ANY_BUTTONS = ['div[role="button"]', 'button'];
 
   const GROW_MS = 2000;          // the last message grew less than this long ago → it is generating
-  const FRESH_CHAT_MS = 120_000; // a new chat gets its URL shortly after the first send
   const LOCK_SENT_MS = 90_000;   // lock: after sending the result, this long at most
   const LOCK_MAX_MS = 240_000;   // …and if the result is never sent, this other one at most
 
@@ -50,8 +50,6 @@
   }
 
   class DeepSeekAdapter extends WMB.BaseAdapter {
-    #conv = convId();                            // current conversation (null = new chat without URL)
-    #tag = this.#conv ?? `h${Date.now()}`;       // conversation tag for the IDs
     #hashCache = new WeakMap();                  // element → {text, set} (hashes of its calls)
     #lock = null;                                // { hash, firedAt, sentAt, newGen }
     #grow = { el: null, len: 0, at: 0 };         // growth tracking of the last message
@@ -96,21 +94,22 @@
       return hostname === 'deepseek.com' || hostname.endsWith('.deepseek.com');
     }
 
-    // ───────────── Conversation ─────────────
-
-    /** Stable conversation tag. A new chat that gets its URL (/ → /a/chat/s/<id>) keeps its tag. */
-    #syncConversation() {
+    /**
+     * The conversation for the ledger and for delivery: the id of the URL, or the root path while the chat has
+     * none yet (DeepSeek assigns /s/<id> once the first reply starts). BaseAdapter adopts the ledger when it does.
+     */
+    conversationKey() {
       const id = convId();
-      if (id === this.#conv) return;
-      const freshChatGotUrl = this.#conv === null && id !== null && Date.now() - this.lastActivity < FRESH_CHAT_MS;
-      this.#conv = id;
-      if (!freshChatGotUrl) this.#tag = id ?? `h${Date.now()}`;
+      return id ? `/s/${id}` : (typeof location !== 'undefined' ? location.pathname : '/');
+    }
+
+    isNewChatPath(path) {
+      return !/\/s\/[^/?#]+/.test(String(path ?? ''));
     }
 
     // ───────────── Assistant messages (without the reasoning) ─────────────
 
     getAssistantMessages() {
-      this.#syncConversation();
       const found = super.getAssistantMessages();
       const answers = found.filter((el) => !isThinking(el));
       // If the filter removed everything, not filtering beats going blind.
@@ -130,19 +129,20 @@
     }
 
     /**
-     * Key by CONTENT: conversation + number of earlier messages carrying the same call.
+     * Key by CONTENT: number of earlier messages carrying the same call. The conversation itself is added by
+     * the base ledger (`#scoped`), so the key stays identical across a reload and a new chat that receives its
+     * URL later — the pending call can still be found.
      * It does not depend on the message position, so page repaints do not "renew" an already run call.
      */
     getMessageKey(element, index) {
       const mine = this.#callHashes(element);
       if (!mine.size) return super.getMessageKey(element, index);
-      this.#syncConversation();
       let before = 0;
       for (const other of this.getAssistantMessages()) {
         if (other === element) break;
         for (const hash of this.#callHashes(other)) if (mine.has(hash)) { before += 1; break; }
       }
-      return `${this.#tag}|${before}`;
+      return `${before}`;
     }
 
     // ───────────── Generation in progress ─────────────

@@ -23,6 +23,7 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf
 const context = vm.createContext({ console, setTimeout, clearTimeout, location: { pathname: '/', hostname: 'localhost' } });
 vm.runInContext(read('content_scripts/constants.js'), context);
 vm.runInContext(read('content_scripts/utils.js'), context);
+vm.runInContext(read('content_scripts/mcp_parser.js'), context);
 vm.runInContext(read('content_scripts/adapters/base_adapter.js'), context);
 const adapters = [];
 vm.runInContext('globalThis.WMB.adapters = []; globalThis.WMB.registerAdapter = (a) => globalThis.WMB.adapters.push(a);', context);
@@ -86,5 +87,32 @@ assert.equal(sites.size, hosts.length, 'one adapter per supported site, no dupli
 // covered by the generic fallback, which is exactly the drift this contract prevents.
 const withBoth = registered.filter((a) => a.selectors.userMessages?.length && a.selectors.assistantMessages?.length);
 assert.ok(withBoth.length >= 3, 'at least three sites declare both their assistant and their user selectors');
+
+// A new chat whose URL changes once the first reply starts is the SAME conversation on every platform.
+// Claude used `/new`, Gemini `/app`: without their override the first result was dropped as a navigation.
+const byId = Object.fromEntries(registered.map((a) => [a.id, a]));
+assert.equal(byId.claude.isNewChatPath('/new'), true, 'Claude: /new is a new chat');
+assert.equal(byId.claude.isNewChatPath('/chat/abc'), false, 'Claude: /chat/<id> is a real conversation');
+assert.equal(byId.gemini.isNewChatPath('/app'), true, 'Gemini: /app is a new chat');
+assert.equal(byId.gemini.isNewChatPath('/app/abc'), false, 'Gemini: /app/<id> is a real conversation');
+assert.equal(byId.chatgpt.isNewChatPath('/'), true, 'ChatGPT: / is a new chat');
+assert.equal(byId.chatgpt.isNewChatPath('/c/abc'), false, 'ChatGPT: /c/<id> is a real conversation');
+assert.equal(byId.deepseek.isNewChatPath('/'), true, 'DeepSeek: / is a new chat');
+assert.equal(byId.deepseek.isNewChatPath('/s/abc'), false, 'DeepSeek: /s/<id> is a real conversation');
+
+// DeepSeek has no message ids: its content key must survive a reload (a pending call is resumed by id). It
+// used to embed a per-page-load timestamp, so every reload renamed the same message and the ledger missed it.
+{
+  const element = { textContent: '{"mcp_call":{"server":"terminal","name":"run_command","arguments":{"command":"echo hi"}}}' };
+  const first = byId.deepseek;
+  first.getAssistantMessages = () => [element];
+  const firstKey = first.getMessageKey(element, 0);
+  const stamp = Date.now();
+  while (Date.now() === stamp) { /* force a different construction timestamp */ }
+  context.location.pathname = '/s/abc'; // the URL the reload starts with
+  const reloaded = new byId.deepseek.constructor();
+  reloaded.getAssistantMessages = () => [element];
+  assert.equal(reloaded.getMessageKey(element, 0), firstKey, 'DeepSeek: the call id is stable across a reload and a URL assignment');
+}
 
 console.log(`✔ test_adapters: ${registered.length} adapters covering ${hosts.join(', ')}`);

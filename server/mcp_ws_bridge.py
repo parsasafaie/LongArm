@@ -40,9 +40,10 @@ Control port / security
 Security
 --------
 * Only listens on 127.0.0.1 by default.
-* Rejects connections whose `Origin` is a web page (for example https://chatgpt.com):
-  it only accepts extensions (`chrome-extension://...`) or clients without Origin (CLI).
-* The control port applies the same Origin rule; /reload and /shutdown only accept POST.
+* Rejects connections whose `Origin` is a web page (for example https://chatgpt.com) and any extension
+  OTHER than the id pinned by manifest.json `key` (or `allowed_extension_ids` / `WMB_EXTENSION_IDS`).
+  Clients without an Origin (local CLI) are accepted: they already have the user's OS rights.
+* The control port applies the same exact-id rule; /reload and /shutdown only accept POST.
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ import argparse
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import shlex
 import shutil
@@ -66,7 +68,7 @@ try:  # websockets >= 13
 except ImportError:  # websockets 12
     from websockets import serve as ws_serve  # type: ignore[assignment]
 
-VERSION = "0.0.1"
+VERSION = "0.1.0"
 DEFAULT_CONTROL_PORT = 8099
 log = logging.getLogger("mcp_ws_bridge")
 
@@ -96,8 +98,44 @@ class _HandshakeFailureHint(logging.Filter):
 logging.getLogger("websockets.server").addFilter(_HandshakeFailureHint())
 
 STDIO_LIMIT = 32 * 1024 * 1024  # maximum size of a JSON-RPC message
-ALLOWED_ORIGIN_PREFIXES = ("chrome-extension://",)
+# The extension id is pinned by the `key` field of manifest.json, so every build of THIS project has the same
+# id. Any OTHER Chrome extension used to pass the old `chrome-extension://` prefix check and could run tools.
+DEFAULT_EXTENSION_ID = "ilnjjdjoklladplnidbfmcjgalkmigjn"
 WIN = sys.platform == "win32"
+
+
+def _clean_extension_id(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text if text and all("a" <= ch <= "p" for ch in text) and len(text) == 32 else ""
+
+
+def _extension_ids_from_env() -> tuple[str, ...]:
+    """`WMB_EXTENSION_IDS=a,b` for a custom build; otherwise the project id pinned in the manifest."""
+    raw = os.environ.get("WMB_EXTENSION_IDS", "")
+    ids = tuple(ext for ext in (_clean_extension_id(x) for x in raw.split(",")) if ext)
+    return ids or (DEFAULT_EXTENSION_ID,)
+
+
+def _origin_extension_id(origin: str | None) -> str:
+    prefix = "chrome-extension://"
+    if not origin or not origin.startswith(prefix):
+        return ""
+    return _clean_extension_id(origin[len(prefix):].split("/", 1)[0])
+
+
+def _origin_allowed(origin: str | None, allowed_ids: tuple[str, ...]) -> bool:
+    # No Origin = a command-line client on this machine (already has the user's OS rights).
+    return origin is None or _origin_extension_id(origin) in allowed_ids
+
+
+# The ids the control port accepts; `run()` replaces them with the registry's `allowed_extension_ids`.
+ACTIVE_EXTENSION_IDS: tuple[str, ...] = _extension_ids_from_env()
+
+
+def _apply_extension_ids(configs: list[ServerConfig]) -> None:
+    global ACTIVE_EXTENSION_IDS
+    if configs:
+        ACTIVE_EXTENSION_IDS = configs[0].extension_ids
 # start_bridge_loop.pyw sets it to 1: if the bridge exits to restart itself, the supervisor brings it back up.
 SUPERVISED = os.environ.get("WMB_SUPERVISED") == "1"
 
@@ -112,7 +150,9 @@ class ServerConfig:
     host: str = "127.0.0.1"
     cwd: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    allowed_origins: tuple[str, ...] = ALLOWED_ORIGIN_PREFIXES
+    # Exact extension ids accepted (from servers.json `allowed_extension_ids`, `WMB_EXTENSION_IDS`, or the
+    # id pinned by the manifest). A prefix is never accepted: any extension could present it.
+    extension_ids: tuple[str, ...] = (DEFAULT_EXTENSION_ID,)
     # The server's guide file (from the registry entry's `guide_path`): the text the AI is given about it.
     guide_path: Path | None = None
 
@@ -125,10 +165,6 @@ def _request_parts(ws) -> tuple[str, dict]:
     if request is not None:
         return request.path, request.headers
     return ws.path, ws.request_headers  # websockets 12
-
-
-def _origin_allowed(origin: str | None, cfg: ServerConfig) -> bool:
-    return origin is None or origin.startswith(cfg.allowed_origins)
 
 
 async def _spawn(cfg: ServerConfig) -> asyncio.subprocess.Process:
@@ -163,13 +199,19 @@ async def _stop(proc: asyncio.subprocess.Process) -> None:
         pass
     try:
         if WIN:
-            proc.terminate()
+            # Kill the entire process tree on Windows so child CLI processes are not orphaned
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/F", "/T"],
+                           capture_output=True, timeout=5, creationflags=0x08000000)
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # the group: the tree, not only the child
         await asyncio.wait_for(proc.wait(), 3)
     except Exception:  # noqa: BLE001
         try:
-            proc.kill()
+            if WIN:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/F", "/T"],
+                               capture_output=True, timeout=5, creationflags=0x08000000)
+            else:
+                proc.kill()
         except Exception:  # noqa: BLE001
             pass
 
@@ -180,7 +222,13 @@ async def _stdout_to_ws(proc: asyncio.subprocess.Process, ws) -> None:
     """MCP server stdout -> WebSocket (one line = one JSON-RPC message)."""
     assert proc.stdout is not None
     while True:
-        line = await proc.stdout.readline()
+        try:
+            line = await proc.stdout.readline()
+        except (ValueError, asyncio.LimitOverrunError, asyncio.IncompleteReadError) as err:
+            # One JSON-RPC line over STDIO_LIMIT: close this client instead of dying with a traceback.
+            log.error("[%s] the server wrote a single line above the %d MB limit (%s); closing the connection",
+                      "mcp", STDIO_LIMIT // (1024 * 1024), err)
+            return
         if not line:
             return
         text = line.decode("utf-8", errors="replace").strip()
@@ -194,7 +242,7 @@ async def _stdout_to_ws(proc: asyncio.subprocess.Process, ws) -> None:
         await ws.send(text)
 
 
-async def _ws_to_stdin(proc: asyncio.subprocess.Process, ws) -> None:
+async def _ws_to_stdin(proc: asyncio.subprocess.Process, ws, name: str = "mcp") -> None:
     """WebSocket -> MCP server stdin. Answers `ping` directly."""
     assert proc.stdin is not None
     async for raw in ws:
@@ -203,6 +251,13 @@ async def _ws_to_stdin(proc: asyncio.subprocess.Process, ws) -> None:
         try:
             message = json.loads(raw)
         except ValueError:
+            continue
+        if isinstance(message, dict) and message.get("method") == "notifications/cancelled":
+            # MCP cancellation is advisory; a terminal command may ignore it. Each connection owns ONE child,
+            # so a hard stop of that child is a real cancellation. The socket closes and the extension
+            # reconnects (nothing else is in flight: the queue is serial).
+            log.warning("[%s] Tool call cancelled by the client: stopping the MCP child", name)
+            asyncio.create_task(_stop(proc))
             continue
         if isinstance(message, dict) and message.get("method") == "ping" and "id" in message:
             await ws.send(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
@@ -234,7 +289,7 @@ _child_counts: dict[tuple[str, int], int] = {}
 async def handle_client(ws, cfg: ServerConfig) -> None:
     """Each WebSocket connection gets its own MCP child process."""
     origin = _request_parts(ws)[1].get("Origin")
-    if not _origin_allowed(origin, cfg):
+    if not _origin_allowed(origin, cfg.extension_ids):
         log.warning("[%s] Connection rejected: origin not allowed (%s)", cfg.name, origin)
         await ws.close(1008, "Origin not allowed")
         return
@@ -262,7 +317,7 @@ async def _serve_client(ws, cfg: ServerConfig) -> None:
     log.info("[%s] Client connected -> pid %s", cfg.name, proc.pid)
     pipes = {
         asyncio.create_task(_stdout_to_ws(proc, ws)),
-        asyncio.create_task(_ws_to_stdin(proc, ws)),
+        asyncio.create_task(_ws_to_stdin(proc, ws, cfg.name)),
     }
     stderr_task = asyncio.create_task(_log_stderr(proc, cfg.name))
     try:
@@ -358,6 +413,7 @@ class Supervisor:
         self.config_error: str | None = None   # last error reading servers.json (None = all good)
         self.restart_requested = False
         self.started_at = time.time()
+        self.extension_ids: tuple[str, ...] = ACTIVE_EXTENSION_IDS
         # Serializes apply()/retry_failed(): a file save (the watcher) and a POST /reload can land at the
         # same time, and two interleaved applies would both try to _start_one the same listener — the loser
         # would record a false "port busy" that no config ever caused.
@@ -453,7 +509,7 @@ async def _http_reply(writer, status: int, payload: dict | None, origin: str | N
     body = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     head = [f"HTTP/1.1 {status} {_REASONS.get(status, 'OK')}", "Content-Type: application/json; charset=utf-8",
             f"Content-Length: {len(body)}", "Connection: close", "Cache-Control: no-store"]
-    if origin and origin.startswith(ALLOWED_ORIGIN_PREFIXES):
+    if _origin_allowed(origin, ACTIVE_EXTENSION_IDS) and origin is not None:
         head += [f"Access-Control-Allow-Origin: {origin}", "Access-Control-Allow-Methods: GET, POST, OPTIONS",
                  "Access-Control-Allow-Private-Network: true", "Vary: Origin"]
     writer.write(("\r\n".join(head) + "\r\n\r\n").encode("latin-1") + body)
@@ -512,7 +568,7 @@ async def _control_handler(reader, writer, sup: Supervisor, config_path: Path | 
         host_name = host.rsplit(":", 1)[0].strip("[]") if host else ""
         if host and host_name not in ("127.0.0.1", "localhost", "::1"):  # anti DNS-rebinding
             await _http_reply(writer, 403, {"ok": False, "error": "host not allowed"}, None)
-        elif origin and not origin.startswith(ALLOWED_ORIGIN_PREFIXES):
+        elif not _origin_allowed(origin, ACTIVE_EXTENSION_IDS):
             await _http_reply(writer, 403, {"ok": False, "error": "origin not allowed"}, None)
         elif method == "OPTIONS":
             await _http_reply(writer, 204, None, origin)
@@ -534,6 +590,8 @@ async def _control_handler(reader, writer, sup: Supervisor, config_path: Path | 
                     sup.config_error = error
                     await _http_reply(writer, 500, {"ok": False, "error": f"invalid servers.json: {error}"}, origin)
                 else:
+                    _apply_extension_ids(configs)
+                    sup.extension_ids = ACTIVE_EXTENSION_IDS
                     report = await sup.apply(configs)
                     sup.config_error = None
                     await _http_reply(writer, 200, {"ok": True, **report, "servers": sup.snapshot()}, origin)
@@ -622,6 +680,8 @@ async def _watch(sup: Supervisor, path: Path) -> None:
                 log.error("invalid servers.json (keeping the previous configuration): %s", error)
             else:
                 try:
+                    _apply_extension_ids(configs)
+                    sup.extension_ids = ACTIVE_EXTENSION_IDS
                     report = await sup.apply(configs)
                     sup.config_error = None
                     log.info("servers.json reloaded: %s", report)
@@ -635,7 +695,9 @@ async def _watch(sup: Supervisor, path: Path) -> None:
 async def run(configs: list[ServerConfig], control_port: int = 0, config_path: Path | None = None,
               config_error: str | None = None) -> bool:
     """Runs the bridge until it is stopped. Returns True if a RESTART was requested."""
+    _apply_extension_ids(configs)
     sup = Supervisor()
+    sup.extension_ids = ACTIVE_EXTENSION_IDS
     sup.config_error = config_error
     await sup.apply(configs)
     control = None
@@ -702,6 +764,17 @@ def load_config(path: Path) -> tuple[list[ServerConfig], int | None]:
     entries = data if isinstance(data, list) else (data.get("servers") if isinstance(data, dict) else None)
     if not isinstance(entries, list):
         raise ValueError('the "servers": [ ... ] list is missing')
+    # Optional: restrict the WebSocket/control ports to exactly these extension ids. The default is the id
+    # pinned by the manifest (or WMB_EXTENSION_IDS for a custom build) — never a bare chrome-extension:// prefix.
+    extension_ids = _extension_ids_from_env()
+    configured_ids = data.get("allowed_extension_ids") if isinstance(data, dict) else None
+    if configured_ids is not None:
+        if not isinstance(configured_ids, list) or not configured_ids:
+            raise ValueError('"allowed_extension_ids" must be a non-empty list of extension ids')
+        cleaned = tuple(_clean_extension_id(x) for x in configured_ids)
+        if not all(cleaned):
+            raise ValueError('"allowed_extension_ids" entries must be 32 characters a-p (a Chrome extension id)')
+        extension_ids = cleaned
     base = Path(path).resolve().parent
     configs: list[ServerConfig] = []
     names: set[str] = set()
@@ -773,6 +846,7 @@ def load_config(path: Path) -> tuple[list[ServerConfig], int | None]:
             host=host,
             cwd=cwd,
             env={str(k): str(v) for k, v in env.items()},
+            extension_ids=extension_ids,
         ))
     control = data.get("control_port") if isinstance(data, dict) else None
     try:
@@ -815,13 +889,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _setup_logging(args) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-        filename=str(args.log_file) if args.log_file else None,
-        encoding="utf-8" if args.log_file else None,
-    )
+    level = logging.DEBUG if args.verbose else logging.INFO
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(level)
+    if args.log_file:
+        # A long-lived bridge used to grow bridge.log without limit: 5 MB × 2 old files is enough to debug
+        # without ever filling the disk.
+        handler = logging.handlers.RotatingFileHandler(args.log_file, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8")
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
+    else:
+        logging.basicConfig(level=level, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
 
 def _print_status(port: int) -> bool:
@@ -879,7 +960,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--stop/--status/--reload/--restart need --config servers.json")
         if not command:
             parser.error("give the MCP server command after `--` or use --config")
-        cfg = ServerConfig(name=args.name, command=command, port=args.port, host=args.host, cwd=args.cwd)
+        cfg = ServerConfig(name=args.name, command=command, port=args.port, host=args.host, cwd=args.cwd,
+                           extension_ids=_extension_ids_from_env())
         control = args.control_port or 0
         try:
             asyncio.run(run([cfg], control_port=control))

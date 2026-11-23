@@ -107,6 +107,15 @@ TOOLS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "sleep",
+        "description": "Sleeps for the given seconds (used by the cancellation test).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"seconds": {"type": "number"}},
+            "required": ["seconds"],
+        },
+    },
 ]
 
 
@@ -119,6 +128,9 @@ def call_tool(name: str, args: dict) -> str:
         return str(args["a"] + args["b"])
     if name == "echo":
         return str(args["text"])
+    if name == "sleep":
+        time.sleep(float(args.get("seconds", 1)))
+        return "slept"
     raise KeyError(name)
 
 

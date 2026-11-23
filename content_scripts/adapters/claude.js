@@ -48,6 +48,15 @@
     matches(hostname) {
       return hostname === 'claude.ai';
     }
+
+    /**
+     * Claude opens a new chat at `/new` and moves to `/chat/<id>` once the first reply starts. Without this,
+     * that URL change was read as "another conversation" and the first reply's result was dropped.
+     */
+    isNewChatPath(path) {
+      const p = String(path ?? '');
+      return p === '' || p === '/' || p === '/new' || p === '/new/';
+    }
   }
 
   WMB.registerAdapter(new ClaudeAdapter());

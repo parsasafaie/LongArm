@@ -17,6 +17,7 @@ const BACKOFF_MAX_MS = 30_000;
 export class McpConnection {
   #ws = null;
   #pending = new Map();
+  #requestIds = new Map(); // end-to-end request id → JSON-RPC id on the wire
   #nextId = 1;
   #closedByUser = false;
   #attempt = 0;
@@ -102,20 +103,45 @@ export class McpConnection {
     ]);
   }
 
-  /** Sends a JSON-RPC request and waits for the response. */
-  request(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  /**
+   * Sends a JSON-RPC request and waits for the response.
+   * `requestId` is the controller's end-to-end id: it travels in the MCP `_meta` so a server (and the logs)
+   * can correlate the call even though JSON-RPC needs its own numeric id on the wire.
+   */
+  request(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS, requestId = null) {
     return new Promise((resolve, reject) => {
       if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) {
         reject(new Error('MCP server disconnected.'));
         return;
       }
       const id = this.#nextId++;
+      if (requestId) this.#requestIds.set(requestId, id);
+      const forget = () => {
+        if (requestId && this.#requestIds.get(requestId) === id) this.#requestIds.delete(requestId);
+      };
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        reject(new Error(`Timed out on «${method}».`));
+        forget();
+        // A tool the page stopped waiting for must be stopped on the server too: the bridge turns
+        // `notifications/cancelled` into a hard stop of the tool child. Otherwise the request id is gone from
+        // #requestIds and a later CANCEL_TOOL cannot find it: the command would keep running with nobody left
+        // to read its answer.
+        if (method === 'tools/call' && this.#ws?.readyState === WebSocket.OPEN) {
+          try {
+            this.#ws.send(JSON.stringify({
+              jsonrpc: '2.0', method: 'notifications/cancelled',
+              params: { requestId: id, reason: 'timed out waiting for the tool' },
+            }));
+          } catch { /* the socket is already gone: the close/reconnect path handles it */ }
+        }
+        const hint = method === 'tools/call'
+          ? ' The tool may still be running or may have partially applied; do not resend the same call until you check its effect.'
+          : '';
+        reject(new Error(`Timed out on «${method}».${hint}`));
       }, timeoutMs);
-      this.#pending.set(id, { resolve, reject, timer });
-      this.#ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+      this.#pending.set(id, { resolve, reject, timer, requestId, forget });
+      const wireParams = requestId ? { ...params, _meta: { ...(params._meta ?? {}), 'longarm/request_id': requestId } } : params;
+      this.#ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params: wireParams }));
     });
   }
 
@@ -125,14 +151,42 @@ export class McpConnection {
     }
   }
 
-  callTool(name, args, timeoutMs) {
-    return this.request('tools/call', { name, arguments: args ?? {} }, timeoutMs);
+  callTool(name, args, timeoutMs, requestId = null) {
+    return this.request('tools/call', { name, arguments: args ?? {} }, timeoutMs, requestId);
+  }
+
+  /**
+   * Cancels an in-flight call by its end-to-end id: the pending promise rejects at once and the server gets
+   * `notifications/cancelled`. The bridge turns that into a hard stop of the tool child (the MCP protocol's
+   * cancellation is advisory; a terminal command may ignore it).
+   */
+  cancel(requestId) {
+    const wireId = this.#requestIds.get(requestId);
+    if (wireId === undefined) return false;
+    this.#requestIds.delete(requestId);
+    const pending = this.#pending.get(wireId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.#pending.delete(wireId);
+      const err = new Error('Cancelled.');
+      err.cancelled = true;
+      pending.reject(err);
+    }
+    if (this.#ws?.readyState === WebSocket.OPEN) {
+      this.#ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: wireId, reason: 'cancelled by the user or the queue budget' } }));
+    }
+    return true;
   }
 
   async refreshTools() {
     const tools = [];
+    const seen = new Set();
     let cursor;
+    let pages = 0;
     do {
+      if (pages >= 50 || (cursor && seen.has(cursor))) break; // a server repeating nextCursor must not hang the handshake
+      pages += 1;
+      if (cursor) seen.add(cursor);
       const res = await this.request('tools/list', cursor ? { cursor } : {});
       tools.push(...(res.tools ?? []));
       cursor = res.nextCursor;
@@ -167,9 +221,10 @@ export class McpConnection {
     // Response to one of our requests
     if (msg.id !== undefined && msg.method === undefined) {
       const pending = this.#pending.get(msg.id);
-      if (!pending) return;
+      if (!pending) return; // a late answer after a timeout/cancel: nothing is waiting for it
       this.#pending.delete(msg.id);
       clearTimeout(pending.timer);
+      pending.forget?.();
       if (msg.error) pending.reject(new Error(msg.error.message ?? 'MCP error'));
       else pending.resolve(msg.result);
       return;
@@ -192,6 +247,7 @@ export class McpConnection {
       reject(new Error('Connection closed.'));
     }
     this.#pending.clear();
+    this.#requestIds.clear();
     this.tools = [];
     if (this.status === 'connected') this.#resetReady();
   }

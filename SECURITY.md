@@ -8,7 +8,7 @@ Security fixes are provided for the latest release only.
 
 | Version | Supported |
 |---------|-----------|
-| 0.0.1   | Yes       |
+| 0.1.0   | Yes       |
 | older   | No        |
 
 ## Reporting a vulnerability
@@ -59,8 +59,10 @@ Out of scope:
 
 | Risk | Mitigation |
 |---|---|
-| A website opens `ws://localhost` and runs your tools | The bridge rejects any request whose `Origin` is a web page — only browser extensions pass. |
-| The AI runs unwanted actions | *Always ask* is the default; *Always allow* is an explicit choice per server or globally, and *Never allow* blocks one completely (its tools are not even described to the AI). |
+| A website or ANOTHER extension opens `ws://localhost` and runs your tools | The bridge rejects any request whose `Origin` is a web page, and accepts only the extension id pinned by the manifest `key` (configurable with `allowed_extension_ids` in `servers.json` or `WMB_EXTENSION_IDS`) — a bare `chrome-extension://` prefix is not enough. |
+| The AI runs unwanted actions | *Always ask* is the default; *Always allow* is an explicit choice per server or globally, and *Never allow* blocks one completely (its tools are not even described to the AI). Revoking permission while a tool runs is reported as `rejected`, with the answer saying it may have started. |
+| A batch hides one call behind another | Every call in a batch is resolved and checked on its own; with *Always ask* each one gets its own dialog, and every call gets its own result. An unreadable block gets a `format_error` while its readable siblings still run (never the other way around). |
+| A model repeats a call in a loop | An identical call inside the repeat window (15 s) is answered from the previous result instead of running again; the next repetition is halted with an explicit error, so a recursive model cannot keep repeating a side effect. |
 | Hidden instructions inside results (prompt injection) | Results are framed as `[MCP_RESULT …]` data only, and every call is shown to you before it runs when the permission is *Always ask*. |
 | Network exposure | The bridge listens on `127.0.0.1` only, and the extension refuses any server address that is not local (`localhost` / `127.0.0.1` / `::1`). |
 | A website reads or shuts down the control (`8099`) or launcher (`8098`) ports | They reject any web-page `Origin` and any non-local host, state-changing routes require `POST`, and `--restart` only closes real bridge processes. |
@@ -69,11 +71,12 @@ Out of scope:
 
 In one line:
 
-- The bridge listens on `127.0.0.1` only. A request that carries an `Origin` header is accepted only from a browser extension (`chrome-extension://`); clients that send no `Origin` at all (command-line tools on the same machine) are also accepted.
+- The bridge listens on `127.0.0.1` only. A request that carries an `Origin` header is accepted only from the LongArm extension id (pinned in the manifest, or listed in `allowed_extension_ids`); clients that send no `Origin` at all (command-line tools on the same machine) are also accepted.
 - The control and launcher ports accept only local hosts and apply the same Origin rule; state-changing routes require `POST`.
-- Every tool call requires approval by default.
+- Every tool call requires approval by default — each member of a batch included.
 - Every server address the extension accepts points at this machine.
 - Tool results are presented to the AI as data, not instructions.
+- A call whose result was already produced is not run again inside the repeat window; a repeating loop is halted with an explicit error.
 
 ## Safe usage recommendations
 

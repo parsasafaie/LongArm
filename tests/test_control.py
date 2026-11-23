@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BRIDGE = str(ROOT / "server/mcp_ws_bridge.py")
 FIXTURE = str(ROOT / "tests/fixtures/test_mcp_server.py")
 CONTROL = 18799
-ENV = {**os.environ, "WMB_NO_OPEN": "1", "WMB_NO_MCP_SCAN": "1"}  # no editors, and only the servers this test declares
+EXTENSION_ID = "ilnjjdjoklladplnidbfmcjgalkmigjn"  # pinned by manifest.json `key`
+ENV = {**os.environ, "WMB_NO_OPEN": "1", "WMB_NO_MCP_SCAN": "1", "WMB_EXTENSION_IDS": EXTENSION_ID}
 ENV.pop("WMB_SUPERVISED", None)
 
 
@@ -75,13 +76,14 @@ def main():
             assert set(found) == {"one", "two"} and all(s["status"] == "listening" for s in found.values()), found
             assert found["one"]["url"] == "ws://127.0.0.1:18771", found
             info = call("GET", "/servers")[1]
-            assert info["config_error"] is None and info["version"] == "0.0.1", info
+            assert info["config_error"] is None and info["version"] == "0.1.0", info
 
             # A website can NOT read or shut down the bridge
             assert call("GET", "/servers", origin="https://chatgpt.com")[0] == 403
             assert call("POST", "/shutdown", origin="https://evil.example")[0] == 403
             assert call("POST", "/restart", origin="https://evil.example")[0] == 403
             assert call("POST", "/open-config", origin="https://evil.example")[0] == 403
+            assert call("GET", "/servers", origin="chrome-extension://abcdefghijklmnop")[0] == 403, "another extension is NOT trusted"
             assert call("GET", "/shutdown")[0] == 405
             assert call("GET", "/restart")[0] == 405
             assert call("GET", "/open-config")[0] == 405
@@ -92,8 +94,8 @@ def main():
             assert conn.getresponse().status == 403
             conn.close()
 
-            # The extension (chrome-extension:// origin) can open the file
-            status, body = call("POST", "/open-config", origin="chrome-extension://abcdefghijklmnop")
+            # The project extension (its exact chrome-extension:// id) can open the file
+            status, body = call("POST", "/open-config", origin=f"chrome-extension://{EXTENSION_ID}")
             assert status == 200 and body["ok"] and body["path"].endswith("servers.json"), (status, body)
 
             # Hot reload: a server is added and another removed without restarting

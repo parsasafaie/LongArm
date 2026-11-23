@@ -3,13 +3,14 @@
 import assert from 'node:assert/strict';
 
 // The module reads the extension version through chrome.*; a stand-in is enough here.
-globalThis.chrome = { runtime: { getManifest: () => ({ version: '0.0.1' }) } };
+globalThis.chrome = { runtime: { getManifest: () => ({ version: '0.1.0' }) } };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ───────────────────────── A fake MCP server on a WebSocket ─────────────────────────
 let sockets = [];
 let answer = true; // false = the server never answers (for the timeout case)
+let loopCursor = false; // true = tools/list always repeats nextCursor
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -32,7 +33,8 @@ class FakeWebSocket {
     }, 0);
     if (msg.method === 'initialize') reply({ serverInfo: { name: 'fake', version: '1' } });
     else if (msg.method === 'tools/list') {
-      reply(msg.params?.cursor ? { tools: [{ name: 'second' }] } : { tools: [{ name: 'first' }], nextCursor: 'page2' });
+      if (loopCursor) reply({ tools: [{ name: 'loop' }], nextCursor: 'forever' });
+      else reply(msg.params?.cursor ? { tools: [{ name: 'second' }] } : { tools: [{ name: 'first' }], nextCursor: 'page2' });
     } else if (msg.method === 'tools/call') reply({ content: [{ type: 'text', text: 'done' }] });
     else reply({});
   }
@@ -73,6 +75,19 @@ assert.ok(events.some((e) => e.kind === 'tools'), 'a tools event is reported aft
 
 answer = false;
 await assert.rejects(() => conn.request('slow/method', {}, 80), /Timed out on «slow\/method»/, 'a silent request rejects');
+let timedOutToolWireId = null;
+await assert.rejects(async () => {
+  const pending = conn.callTool('run', { command: 'x' }, 80);
+  timedOutToolWireId = sockets.at(-1).sent.filter((m) => m.method === 'tools/call').at(-1)?.id ?? null;
+  await pending;
+}, /may still be running/, 'a timed-out TOOL warns that it may have partially run');
+await sleep(10);
+assert.ok(
+  sockets.at(-1).sent.some((m) => m.method === 'notifications/cancelled'
+    && m.params?.requestId === timedOutToolWireId
+    && /timed out/i.test(m.params?.reason ?? '')),
+  'a timed-out tool call is cancelled on the wire (the bridge stops the child; nobody is waiting for it)',
+);
 answer = true;
 
 // ───────────────────────── 3. Requests from the server side: ping answered, others refused ─────────────────────────
@@ -86,8 +101,24 @@ assert.equal(socket.sent.find((m) => m.id === 902)?.error?.code, -32601, 'an unk
 
 // ───────────────────────── 4. callTool sends tools/call and returns its result ─────────────────────────
 
-const result = await conn.callTool('run', { command: 'x' }, 1000);
+const result = await conn.callTool('run', { command: 'x' }, 1000, 'req-4');
 assert.equal(result.content[0].text, 'done');
+assert.equal(sockets.at(-1).sent.find((m) => m.method === 'tools/call' && m.params?.arguments?.command === 'x').params._meta['longarm/request_id'], 'req-4', 'the request id travels in _meta');
+
+// Cancellation: the pending promise rejects at once and the server gets notifications/cancelled.
+answer = false;
+const slow = conn.callTool('run', { command: 'slow' }, 5000, 'req-cancel');
+await sleep(20);
+const slowWireId = sockets.at(-1).sent.filter((m) => m.method === 'tools/call').at(-1).id;
+assert.equal(conn.cancel('req-cancel'), true, 'the in-flight call is found by its request id');
+await assert.rejects(() => slow, /Cancelled/, 'the caller stops waiting immediately');
+assert.deepEqual(
+  sockets.at(-1).sent.find((m) => m.method === 'notifications/cancelled' && m.params?.requestId === slowWireId).params,
+  { requestId: slowWireId, reason: 'cancelled by the user or the queue budget' },
+  'the server is told which JSON-RPC request to cancel',
+);
+assert.equal(conn.cancel('req-cancel'), false, 'cancelling twice does nothing');
+answer = true;
 
 // ───────────────────────── 5. A server-side close reconnects; a client close does not ─────────────────────────
 
@@ -110,4 +141,15 @@ const idle = new McpConnection({ id: 'idle', name: 'x', url: 'ws://127.0.0.1:9' 
 assert.equal(await idle.whenReady(50), false, 'it never became ready');
 assert.equal(idle.status, 'disconnected');
 
+// ───────────────────────── 7. A server that repeats nextCursor cannot hang the handshake ─────────────────────────
+
+loopCursor = true;
+const looping = new McpConnection({ id: 'loop', name: 'loop', url: 'ws://127.0.0.1:9' });
+looping.connect();
+assert.equal(await looping.whenReady(3000), true, 'the handshake completes despite the endless cursor');
+assert.ok(looping.tools.length <= 50, `tools/list is capped (got ${looping.tools.length} pages)`);
+looping.close();
+loopCursor = false;
+
 console.log('✔ test_ws_client: all checks passed');
+process.exit(0); // the keepalive interval of the connections keeps the process alive

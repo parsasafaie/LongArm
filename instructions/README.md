@@ -8,10 +8,12 @@ The extension writes **nothing** into your chats. Install this text **once** whe
 instructions for the model — a Project, a custom GPT, or a Gemini Skill — and from then on:
 
 - in a ChatGPT/Claude **Project** the rules travel with every message; in a Gemini **Skill** they apply
-to the chat once you add it — type `/` and pick the skill (Gemini also applies it on its own when it
-sees the moment fit);
+  to the chat once you add it — type `/` and pick the skill (Gemini also applies it on its own when it
+  sees the moment fit);
 - the AI asks for the tool list itself with `{"mcp_call":{"server":"bridge","name":"list_tools"}}`,
   and the answer arrives as a normal tool result;
+- a message may carry one or more independent calls; dependent calls go in a later message, and the
+  results come back in call order, one block per call;
 - a wrong server or tool name is answered with the valid list, so the AI recovers on its own.
 
 ## Where to put it
@@ -39,6 +41,9 @@ Two more things worth knowing:
 
 - **The name `bridge` is reserved** for the tool-list call. A real MCP server registered under that
   name takes priority and the tool-list call stops working.
+- **Batches are for independent calls.** Asking for two reads in one message is fine; a call that needs
+  the previous answer must wait for its result. The extension runs a batch in order and answers every
+  call, even when one of them is refused or fails.
 - **Clean chat is only about display.** With *Keep the chat clean* on (Settings → *The chat*), the
   tool results, the tool list and the notices are kept out of sight, and so is the AI's `mcp_call`
   message — the AI still receives all of it. Turning it off puts everything back on screen; it has

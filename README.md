@@ -18,8 +18,8 @@ Two pieces work together:
 | **The bridge** | A small Python program that connects the extension to your tools (MCP servers) over a local WebSocket. | Your computer, in the background |
 
 1. You ask the AI something in the chat.
-2. The AI answers with a call (a single-line JSON block) asking for a tool.
-3. The extension asks whether you allow it, runs it on your computer, and **pastes the result back into the chat** so the AI can continue.
+2. The AI answers with one or more calls (single-line JSON blocks) asking for tools — several independent calls may travel in one message.
+3. The extension asks whether you allow each one, runs them in order on your computer, and **pastes one result block per call back into the chat** so the AI can continue.
 
 Everything happens on your computer: the extension talks only to the chat site you are using and to `localhost`. What runs on your machine, and the security behind it: [SECURITY.md](SECURITY.md).
 
@@ -67,8 +67,8 @@ The first server the bridge publishes switches itself on (while no other one is 
 3. Install the instructions **once per platform**, where the platform keeps instructions for the model (a Project, a custom GPT, or a Gemini Skill) — see [instructions/README.md](instructions/README.md).
 4. Open [ChatGPT](https://chatgpt.com), [Gemini](https://gemini.google.com), [Claude](https://claude.ai) or [DeepSeek](https://chat.deepseek.com). In ChatGPT and Claude start the chat **inside** the Project; in Gemini add the skill to any chat with `/` (Gemini also applies it on its own when relevant).
 5. Ask for something that needs a tool, for example: **"What time is it on this computer? Use your tools."**
-6. The AI asks for a tool, a dialog opens over the page, and you approve it.
-7. The result is pasted into the chat and the AI answers you.
+6. The AI asks for a tool, a dialog opens over the page, and you approve it (a batch asks once per call).
+7. The results are pasted into the chat and the AI answers you.
 
 By default the permission is **Always ask**: nothing runs unless you approve it. You can change it per server, or for all of them at once.
 
@@ -80,7 +80,7 @@ By default the permission is **Always ask**: nothing runs unless you approve it.
 |---|---|
 | The MCPs | Each server with its state (connected / connecting / disconnected) and how many tools it exposes |
 | The permission of each one | *Always allow* · *Always ask* · *Never allow*, for one server or for all of them |
-| Calls waiting for you | With *Always ask* a dialog opens over the page with the call and its arguments; you press *Run*, *Always allow* or *Reject* (Escape refuses) |
+| Calls waiting for you | With *Always ask* a dialog opens over the page for each call (a batch queues them one after another) with the call and its arguments; you press *Run*, *Always allow* or *Reject* (Escape refuses) |
 | A short log | What is running right now (a call detected, a server reconnecting, an error) |
 
 Drag the bar anywhere; double-click it to put it back in its corner.
@@ -123,6 +123,7 @@ The switch at the bottom of the rail is the **master switch of the extension**, 
 - **`guide_path`** — a short text file, **written for the AI**: what the server is for, when to use it, what it refuses (optional). Keep it small — it is read every time the AI asks for the tools. A complete example: [mcp/terminal/guide.txt](mcp/terminal/guide.txt).
 - **`port`** — the local WebSocket port this server is published on. Unique per server.
 - Also per server: `cwd` (default: the folder `servers.json` sits in), `env` (`{ "NAME": "value" }`), `host` (default `127.0.0.1`), `disabled` (`true` keeps it out).
+- At the top level, `control_port` (default 8099) and `launcher_port` (default 8098) choose the bridge's control port and the launcher's port; `allowed_extension_ids` (optional list) restricts both to exactly those extension ids — by default the id pinned in the manifest.
 
 Relative paths are looked up next to `servers.json` first, then in the project root one level up. Add or edit an entry, save (use **Edit servers.json** in the popup), and within about two seconds the bridge reloads and the server appears in the list — turn it on there and the AI can use it. [mcp/terminal/](mcp/terminal/) is a complete example to copy.
 
@@ -151,8 +152,9 @@ Perplexity, Le Chat and the rest are not supported yet: a new platform is a new 
 | **Nothing is written into the chat** | The rules live in the Project (ChatGPT, Claude) or Skill (Gemini) you install once; the AI asks for the tool list itself with a `list_tools` call. The extension never injects instructions or reminders. |
 | **The AI recovers on its own** | A wrong server or tool name is answered with the valid list; an unreadable call is answered with the exact parse reason. |
 | **Clean chat** | Everything the extension types into the chat — results, the tool list, notices — is kept out of sight by default, and so is the AI's `mcp_call` message. The AI still receives all of it. |
+| **Batch calls** | Several independent calls in one reply run in order and come back in one message, with one result block per call. A call that needs another's result goes in a later message. |
 | **Compact prompt** | Tools are described as `name(param: type)` signatures instead of full JSON Schema. |
-| **No duplicates** | A call identical to one already run is not run again: the previous result is repeated with a note. |
+| **No runaway loops** | An identical call inside a 15-second window is answered from the previous result instead of running again; a model that keeps repeating it is halted with an explicit error. |
 
 ## Something not working?
 
@@ -191,7 +193,7 @@ python server/mcp_ws_bridge.py --port 8081 --name terminal -- python mcp/termina
 
 ## Security
 
-Nothing leaves your machine: the bridge listens on `127.0.0.1` only and refuses web-page origins, every call needs your approval by default, results are framed as data so prompt injection inside them cannot run tools, and the approval dialog shows the call's arguments in full. The complete model — what is protected, what is not, and what to review before connecting a server: [SECURITY.md](SECURITY.md).
+Nothing leaves your machine: the bridge listens on `127.0.0.1` only and refuses web-page origins and every extension except LongArm's own id, every call — including each member of a batch — needs your approval by default, results are framed as data so prompt injection inside them cannot run tools, and the approval dialog shows the call's arguments in full. The complete model — what is protected, what is not, and what to review before connecting a server: [SECURITY.md](SECURITY.md).
 
 ## Development
 
@@ -200,7 +202,7 @@ npm test              # the whole suite: JS checks + parser/protocol/hide/backgr
 npm run check         # the quick gate: every JS file parses, manifest/version/icon consistency
 npm run instructions  # regenerate instructions/instructions.txt from content_scripts/prompt_builder.js
 npm run constants     # regenerate content_scripts/constants.js from shared/constants.js
-npm run release       # bump the version in its three homes, regenerate, check (or: node scripts/release.mjs 0.0.2)
+npm run release       # bump the version in its three extension-side homes, regenerate, check (or: node scripts/release.mjs patch)
 npm run pack          # dist/longarm/ + dist/longarm.zip (Chrome/Edge/Brave)
 python3 scripts/build.py chrome  # the same package without Node (Python's own zipfile)
 python3 scripts/make_icons.py    # regenerate icons/ from assets/logo.png (needs Pillow, a dev-only dependency)

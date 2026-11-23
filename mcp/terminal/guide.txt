@@ -4,12 +4,19 @@ Use: when the task needs the machine itself — files, builds, processes, instal
 a command line does. Prefer running a command over guessing what the answer would be.
 
 Rules:
-- One command at a time; read its output before deciding the next one.
-- There is no keyboard: pass the flags that avoid prompts (-y, --yes, -p), and never ask the user to
-  type into a command.
+- One command at a time; read its output before deciding the next one. Batch only independent commands.
+- There is no keyboard. Never start interactive programs (vim, nano, less, top without -b, ssh without
+  BatchMode, Read-Host, pause); pass the flags that avoid prompts (-y, --yes, -p, --non-interactive) and
+  never ask the user to type into a command.
 - To leave something running, background it: `nohup ... &` (Linux/macOS), `start /b ...` (Windows).
 - A non-zero exit code is an answer, not a failure: read stderr and decide.
 - A refused command means the user said no; do not rewrite it to get it through.
-- Long output keeps the first and the last part, with "... [N characters omitted] ..." in between.
+- Long output keeps the first and the last part, with "... [N characters omitted] ..." in between. For
+  large output, redirect to a file and read only the part you need.
+- For a long script, first write it to a file (with the file-writing tool, or a heredoc in sh /
+  `Set-Content` in PowerShell), then run that file.
+- A timeout killed the process, but it may have partially changed files/state: check before retrying.
+- The shell is cmd.exe on Windows and /bin/sh on Linux/macOS (call terminal_info if unsure). Use commands
+  that exist in THAT shell: a Unix-only command fails on Windows, and the reverse.
 
-Example: {"mcp_call":{"server":"terminal","name":"run_command","arguments":{"command":"df -h /"}}}
+Example (works on every platform): {"mcp_call":{"server":"terminal","name":"run_command","arguments":{"command":"echo hello"}}}

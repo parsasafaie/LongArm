@@ -129,6 +129,7 @@ def run_tests(tmp: str, stderr_path: Path) -> None:
         text, _ = srv.call("run_command", command=py("import time; time.sleep(30)"), timeout=1)
         elapsed = time.monotonic() - started
         assert "TIMED OUT" in text, text
+        assert "may have partially run" in text, "a timeout must warn about partial side effects"
         assert elapsed < 15, f"the timeout took {elapsed:.1f} s"
 
         # --- a missing folder is a clear error, not a crash

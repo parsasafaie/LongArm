@@ -15,7 +15,7 @@ const TESTS = [
 ];
 
 function findPython() {
-  for (const candidate of [['python3'], ['python'], ['py', '-3']]) {
+  for (const candidate of [['server/.venv/Scripts/python.exe'], ['server/.venv/bin/python'], ['python3'], ['python'], ['py', '-3']]) {
     const res = spawnSync(candidate[0], [...candidate.slice(1), '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'], { stdio: 'ignore' });
     if (res.status === 0) return candidate;
   }
@@ -25,9 +25,15 @@ function findPython() {
 
 const py = findPython();
 for (const test of TESTS) {
-  const res = spawnSync(py[0], [...py.slice(1), test], { stdio: 'inherit' });
+  // A skipped test is not a passing test. The old 4 s timeout marked every network test as "restricted
+  // sandbox" (even a real failure/assertion) and exited 0, so CI was green without running them.
+  const res = spawnSync(py[0], [...py.slice(1), test], { stdio: 'inherit', timeout: 120_000 });
+  if (res.error?.code === 'ETIMEDOUT') {
+    console.error(`✘ ${test} timed out after 120s`);
+    process.exit(1);
+  }
   if (res.status !== 0) {
-    console.error(`✘ ${test} failed`);
+    console.error(`✘ ${test} failed (exit ${res.status ?? 'signal'})`);
     process.exit(res.status ?? 1);
   }
 }

@@ -30,6 +30,9 @@
   /** Ceiling of the approval dialog's argument preview: full under it, an honest count above it. */
   const ARGS_PREVIEW_CAP = 100_000;
 
+  /** WMB.sleep keeps counting in a hidden tab; the native timer is only a fallback for a standalone load. */
+  const sleep = (ms) => (typeof WMB.sleep === 'function' ? WMB.sleep(ms) : new Promise((resolve) => setTimeout(resolve, ms)));
+
   const CSS = `
     /* The theme lives on the host so the panel and the approval dialog share it. */
     :host {
@@ -268,17 +271,25 @@
      * A dialog nobody answers resolves as a refusal after the shared approval timeout: the queue behind it must
      * never stall on a prompt the user has walked away from.
      */
-    requestApproval(call) {
+    requestApproval(call, { timeoutMs = WMB.defaults.timeouts.approval } = {}) {
       return new Promise((resolve) => {
-        const item = { call, resolve, timer: 0 };
-        item.timer = setTimeout(() => {
-          if (!this.approvals.includes(item)) return;
+        const item = { call, resolve, done: false, timer: 0 };
+        const timeout = Math.max(0, Number(timeoutMs) || 0);
+        const expire = () => {
+          if (item.done || !this.approvals.includes(item)) return;
+          item.done = true;
           this.approvals = this.approvals.filter((a) => a !== item);
           this.log('err', `No answer for ${call.server} › ${call.name}: treated as a refusal.`);
           item.resolve(false);
           this.render();
-        }, WMB.defaults.timeouts.approval);
+        };
         this.approvals.push(item);
+        // In a HIDDEN tab Chrome throttles page timers (down to once a minute after 5 minutes), so an
+        // unanswered dialog could block the serial queue far beyond the approval timeout: there WMB.sleep
+        // counts in the service worker. A visible tab keeps the cancellable native timer.
+        if (timeout === 0) expire(); // the queue budget is already spent
+        else if (typeof WMB.isBackground === 'function' && WMB.isBackground()) sleep(timeout).then(expire);
+        else item.timer = setTimeout(expire, timeout);
         this.render(); // the pill shows the pending call; #renderApprovals opens the dialog
       });
     }
@@ -383,7 +394,9 @@
       }
       const { call } = item;
       const decide = (value) => {
-        clearTimeout(item.timer); // the user answered: the approval timeout has nothing left to do
+        if (item.done) return;
+        item.done = true; // the user answered: the approval timeout has nothing left to do
+        clearTimeout(item.timer);
         this.approvals = this.approvals.filter((a) => a !== item);
         item.resolve(value);
         this.render(); // the dialog closes; the pill goes back to the server state

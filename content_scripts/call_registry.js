@@ -25,6 +25,18 @@
   /** A result larger than this is not kept: the replay gets a short honest notice instead. */
   const MAX_RESULT_CHARS = 256_000;
 
+  /**
+   * JSON with object keys in a fixed order (arrays keep theirs): `{"a":1,"b":2}` and `{"b":2,"a":1}` are the
+   * SAME call. Without it a model that resends the call with reordered keys would run the side effect again.
+   */
+  const canonical = (value) => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+    }
+    return value;
+  };
+
   /** What the repeat path stores for a result: the result itself, or a small stand-in when it is huge. */
   function bounded(result) {
     if (!result || typeof result !== 'object') return null;
@@ -48,7 +60,7 @@
 
     /** The key of a call: its content, so a repaint of the same message collides and a changed call does not. */
     key(server, name, args) {
-      return WMB.hash(JSON.stringify([server, name, args ?? {}]));
+      return WMB.hash(JSON.stringify([server, name, canonical(args ?? {})]));
     }
 
     /** The live entry, or null — an expired one is dropped on sight (and never answered from). */
@@ -81,10 +93,10 @@
       }
     }
 
-    /** The replayed call counts as another repeat, so the count and the window move with it. */
+    /** The replayed call counts as another repeat, without resetting the expiration window. */
     bump(key) {
       const entry = this.#live(key);
-      if (entry) { entry.count += 1; entry.at = Date.now(); }
+      if (entry) { entry.count += 1; }
     }
 
     clear() {

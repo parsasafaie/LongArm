@@ -72,10 +72,16 @@ export const RESULT_STATUSES = ['ok', 'error', 'rejected', 'format_error'];
  * gives up a little after the service worker does, so a timeout is reported by the side that owns the request
  * instead of both racing to answer. `approval` bounds a dialog nobody answered (the queue must not stall).
  */
-export const CONTENT_TIMEOUTS = { tool: 150_000, deliver: 120_000, approval: 300_000, heartbeat: 10_000 };
+export const CONTENT_TIMEOUTS = {
+  tool: 150_000,       // one tool call (longer than CALL_TIMEOUT_MS on purpose)
+  deliver: 120_000,    // writing a result into the chat
+  approval: 300_000,   // one unanswered approval dialog
+  queue: 600_000,      // the WHOLE batch behind one detection: approvals + reconnects + tools
+  heartbeat: 10_000,
+};
 
-/** An identical call is not run again inside this window: the second one is answered from the previous result. */
-export const REPEAT_CALLS = { windowMs: 15 * 60_000, max: 1 };
+/** An identical call is not run again inside this loop-guard window (15 s): prevents runaway AI recursion loops while allowing legitimate re-runs. */
+export const REPEAT_CALLS = { windowMs: 15_000, max: 1 };
 
 export const SUPPORTED_URL_PATTERNS = [
   'https://chatgpt.com/*',

@@ -61,7 +61,9 @@ def wait_for(cond, timeout=8):
 # --- status and security ---
 st, body = call("GET", "/status")
 assert st == 200 and body["launcher"] is True and body["paused"] is False and body["bridge"] is False, (st, body)
-assert call("GET", "/status", origin="chrome-extension://abcdef")[0] == 200
+EXT = f"chrome-extension://{mod.DEFAULT_EXTENSION_ID}"
+assert call("GET", "/status", origin=EXT)[0] == 200
+assert call("GET", "/status", origin="chrome-extension://abcdef")[0] == 403    # another extension is NOT trusted
 assert call("GET", "/status", origin="https://chatgpt.com")[0] == 403          # a website can NOT control the launcher
 assert call("POST", "/stop", origin="https://evil.example")[0] == 403
 assert call("GET", "/status", host="evil.example:8098")[0] == 403               # DNS rebinding
@@ -70,7 +72,7 @@ assert not paused_file.exists()
 print("OK status and security")
 
 # --- stop / start / restart ---
-st, body = call("POST", "/stop", origin="chrome-extension://abcdef")
+st, body = call("POST", "/stop", origin=EXT)
 assert st == 200 and body["paused"] is True and paused_file.exists(), (st, body)
 assert launcher.paused is True
 st, body = call("POST", "/start")
@@ -89,6 +91,28 @@ assert spawned == [], "while stopped the bridge must not start"
 call("POST", "/start")
 assert wait_for(lambda: len(spawned) >= 1), "on start the bridge must be started"
 print("OK supervisor")
+
+# --- stop while the bridge child is still starting: it is terminated, not left behind ---
+class StuckProc:
+    def __init__(self):
+        self.terminated = False
+        self.killed = False
+    def poll(self):
+        return None
+    def wait(self, timeout=None):
+        raise mod.subprocess.TimeoutExpired("bridge", timeout)
+    def terminate(self):
+        self.terminated = True
+    def kill(self):
+        self.killed = True
+
+stuck = StuckProc()
+launcher.proc = stuck
+launcher.do_stop()
+assert stuck.terminated or stuck.killed, "Stop during spawn must terminate the child"
+launcher.proc = None
+call("POST", "/start")
+print("OK stop during spawn")
 
 # --- quit ---
 st, body = call("POST", "/quit")

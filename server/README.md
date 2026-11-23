@@ -16,7 +16,7 @@ and the internals are in [../ARCHITECTURE.md](../ARCHITECTURE.md) section 2.
 | `bridge.cmd` / `bridge.sh` | The bridge control menu: `start`, `restart`, `status`, `stop`, `reload`. Also finds Python and installs the requirements if they are missing. |
 | `servers.json` | **The registry** — the single list of your MCP servers. Ships with the `terminal` server registered; how to add entries is in [../README.md](../README.md#mcp-servers). |
 | `requirements.txt` | The bridge's only dependency: `websockets`. |
-| `bridge.log` / `loop.log` | What the bridge and the launcher printed (child-process stderr included). The first place to look when something is off. |
+| `bridge.log` / `loop.log` | What the bridge and the launcher printed (child-process stderr included). The first place to look when something is off. `bridge.log` rotates at 5 MB and keeps one previous file. |
 
 ## Operating the bridge
 
@@ -35,6 +35,9 @@ python server/mcp_ws_bridge.py --config server/servers.json --status
   or restarts only the servers that changed. Nothing to click.
 - **Ports:** each server gets the `port` from its entry; the bridge's control port is `8099` and the
   launcher's is `8098` (both configurable in `servers.json` as `control_port` / `launcher_port`).
+- **Only LongArm talks to them**: every WebSocket and control port accepts the extension id pinned in
+  the manifest and rejects web pages and every other extension. A custom build can list its own ids in
+  `allowed_extension_ids` (`servers.json`) or `WMB_EXTENSION_IDS`.
 
 ## When it does not start
 

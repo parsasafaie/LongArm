@@ -46,6 +46,15 @@
     matches(hostname) {
       return hostname === 'gemini.google.com';
     }
+
+    /**
+     * Gemini keeps a new chat at `/app` and gives it `/app/<id>` once the first reply starts. The base
+     * adapter only knew the root, so that URL change looked like another conversation (result dropped).
+     */
+    isNewChatPath(path) {
+      const p = String(path ?? '');
+      return p === '' || p === '/' || p === '/app' || p === '/app/';
+    }
   }
 
   WMB.registerAdapter(new GeminiAdapter());

@@ -24,6 +24,50 @@ import {
 /** @type {Map<string, McpConnection>} serverId → connection */
 const connections = new Map();
 
+// ───────────── Cross-tab execution claims (R-01) ─────────────
+// Two tabs on the same conversation detect the same request at nearly the same time. The first one to
+// claim it runs it; the other is told `fresh:false` and stays quiet (its result would be a duplicate).
+// Short TTL on purpose: it only needs to cover the detection race, not the whole tool run.
+const CLAIM_TTL_MS = 12_000;
+const CLAIMS_KEY = 'wmb_claims';
+const claims = new Map(); // key → {tab, exp}
+// The MV3 worker can be stopped between two detections. `storage.session` survives that (and is still
+// cleared when the browser closes), so the claim table is not lost to a worker restart.
+const claimStore = chrome.storage?.session;
+const claimsReady = (async () => {
+  try {
+    const data = await claimStore?.get?.(CLAIMS_KEY);
+    const saved = data?.[CLAIMS_KEY];
+    if (saved && typeof saved === 'object') {
+      const now = Date.now();
+      for (const [key, entry] of Object.entries(saved)) {
+        if (entry && Number(entry.exp) > now) claims.set(key, { tab: String(entry.tab ?? ''), exp: Number(entry.exp) });
+      }
+    }
+  } catch { /* memory-only */ }
+})();
+function persistClaims() {
+  try {
+    const result = claimStore?.set?.({ [CLAIMS_KEY]: Object.fromEntries(claims) });
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch { /* memory-only */ }
+}
+async function claimCall(key, tabId) {
+  const clean = String(key ?? '').slice(0, 200);
+  if (!clean) return { ok: false, error: 'missing key' };
+  await claimsReady;
+  const tab = String(tabId ?? '').slice(0, 80);
+  const now = Date.now();
+  for (const [k, entry] of claims) if (entry.exp <= now) claims.delete(k);
+  const entry = claims.get(clean);
+  // Only ANOTHER tab is refused. Inside one tab the call registry (repeat guard) owns duplicates: a batch
+  // with four identical calls must still get four answers.
+  if (entry && entry.exp > now && tab && entry.tab !== tab) return { ok: true, fresh: false };
+  claims.set(clean, { tab, exp: now + CLAIM_TTL_MS });
+  persistClaims();
+  return { ok: true, fresh: true };
+}
+
 // ───────────────────────── State and storage ─────────────────────────
 // Reading and writing the servers, the settings and the history lives in store.js: this file keeps the
 // connections, the discovery, the call path and the message router.
@@ -108,6 +152,12 @@ async function discoverServers(force = false) {
 
   const info = await probeBridge(true);
   if (!info.online) return { ok: false, error: 'The bridge was not found. Start it with server/start_bridge_loop.pyw' };
+  // An invalid servers.json is NOT "every server was removed": the bridge answers with an empty list and a
+  // config_error. Deleting the auto entries here would wipe the user's enabled/permission state, and the entry
+  // would come back with a new id and the default permission once the file is fixed.
+  if (info.configError) {
+    return { ok: false, configError: info.configError, error: `servers.json is invalid: ${info.configError}` };
+  }
 
   const list = (Array.isArray(info.servers) ? info.servers : [])
     // `guide` is the text of that server's guide file (guide_path in the registry): what the AI is told about the
@@ -140,7 +190,7 @@ async function discoverServers(force = false) {
     }
     const kept = servers.filter((x) => !(x.auto && !listed.has(x.url)));
     if (kept.length !== servers.length) changed = true;
-    if (changed) { await saveServers(kept); await reconcile(); scheduleBroadcast(); }
+    if (changed) { await saveServers(kept); invalidateTools(); await reconcile(); scheduleBroadcast(); }
     return { ok: true, changed, added, total: list.length };
   });
 }
@@ -154,8 +204,16 @@ function scheduleBroadcast() {
   }, 300);
 }
 
+// Tools change only on a handshake, a tools/list_changed or a settings/permission write. The page heartbeat
+// asks every 10 s; serving that from this 3 s cache avoids a discovery + whenReady(4 s) per tab per beat.
+let activeToolsCache = { at: 0, value: null };
+const invalidateTools = () => { activeToolsCache = { at: 0, value: null }; };
+
 function onConnectionChange(evt) {
-  if (evt.kind === 'tools' || evt.prev === 'connected' || evt.next === 'connected') scheduleBroadcast();
+  if (evt.kind === 'tools' || evt.prev === 'connected' || evt.next === 'connected') {
+    invalidateTools();
+    scheduleBroadcast();
+  }
 }
 
 /** Aligns the open connections with the servers enabled in storage. */
@@ -224,10 +282,14 @@ async function getSnapshot() {
 
 /** Tools of the ACTIVE servers (this is what gets injected into the chat). */
 async function getActiveTools() {
+  if (activeToolsCache.value && Date.now() - activeToolsCache.at < 3000) return activeToolsCache.value;
   await discoverServers().catch(() => {});
   await reconcile();
   const { servers, settings } = await loadState();
-  if (!settings.bridgeEnabled) return { ok: true, tools: [], disabled: true };
+  if (!settings.bridgeEnabled) {
+    activeToolsCache = { at: Date.now(), value: { ok: true, tools: [], disabled: true } };
+    return activeToolsCache.value;
+  }
   const slugs = assignSlugs(servers);
   const active = servers.filter(isUsable); // blocked MCPs («Never allow») are not described to the AI: saves tokens
   await Promise.all(active.map((s) => connections.get(s.id)?.whenReady(4000)));
@@ -247,10 +309,11 @@ async function getActiveTools() {
       });
     }
   }
-  return { ok: true, tools, guides };
+  activeToolsCache = { at: Date.now(), value: { ok: true, tools, guides } };
+  return activeToolsCache.value;
 }
 
-async function callTool({ server, name, arguments: args }) {
+async function callTool({ server, name, arguments: args, request_id: requestId = null }) {
   const { servers, settings } = await loadState();
   if (!settings.bridgeEnabled) return { ok: false, error: 'The bridge is disabled.' };
   const slugs = assignSlugs(servers);
@@ -277,10 +340,27 @@ async function callTool({ server, name, arguments: args }) {
 
   const started = Date.now();
   try {
-    const result = await conn.callTool(name, args, CALL_TIMEOUT_MS);
+    const result = await conn.callTool(name, args, CALL_TIMEOUT_MS, requestId);
+    // The permission may have been changed to «Never allow» WHILE the tool was running: the side effect
+    // cannot be undone, but the controller is told it was a refusal (rejected), not a normal success.
+    const { servers: current } = await loadState();
+    const live = current.find((s) => s.id === target.id);
+    if (!live || live.permission === 'deny') {
+      await addHistory({ ...entry, status: 'error', error: 'Permission revoked while the tool was running.', ms: Date.now() - started });
+      return { ok: false, rejected: true, error: 'The user revoked permission while the tool was running.' };
+    }
     await addHistory({ ...entry, status: result?.isError ? 'error' : 'ok', ms: Date.now() - started });
     return { ok: true, result };
   } catch (err) {
+    // «Never allow» during the call: reconcile closes the connection, so the call ends with a "closed"
+    // error. It is a user REFUSAL, not a tool failure — the controller must answer with `rejected`.
+    const { servers: current } = await loadState();
+    const live = current.find((s) => s.id === target.id);
+    if (!live || live.permission === 'deny') {
+      const error = 'The user revoked permission while the tool was running.';
+      await addHistory({ ...entry, status: 'error', error, ms: Date.now() - started });
+      return { ok: false, rejected: true, error };
+    }
     await addHistory({ ...entry, status: 'error', error: err.message, ms: Date.now() - started });
     return { ok: false, error: err.message };
   }
@@ -291,6 +371,7 @@ async function callTool({ server, name, arguments: args }) {
 const mutate = (fn) => withLock(async () => {
   const { servers, settings } = await loadState();
   const result = await fn(servers, settings);
+  invalidateTools();
   await reconcile();
   scheduleBroadcast();
   return result ?? { ok: true };
@@ -489,6 +570,12 @@ async function handleMessage(msg, sender) {
     case 'GET_STATE': return getSnapshot();
     case 'GET_ACTIVE_TOOLS': return getActiveTools();
     case 'CALL_TOOL': return callTool(msg);
+    case 'CLAIM_CALL': return claimCall(msg.key, msg.tab_id);
+    case 'CANCEL_TOOL': {
+      let cancelled = false;
+      for (const conn of connections.values()) if (conn.cancel(msg.request_id)) cancelled = true;
+      return { ok: true, cancelled };
+    }
     case 'DISCOVER':
       return discoverServers(true);
     case 'RESTART_BRIDGE': return restartBridge();

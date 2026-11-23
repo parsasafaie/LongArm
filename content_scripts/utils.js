@@ -5,7 +5,7 @@
 (() => {
   'use strict';
   const WMB = (globalThis.WMB = globalThis.WMB || {});
-  WMB.VERSION = '0.0.1';
+  WMB.VERSION = '0.1.0';
 
   const nativeSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -15,7 +15,8 @@
   };
 
   /** Is the tab hidden, covered by another window or unfocused? That is where Chrome/Brave throttle the page timers. */
-  WMB.isBackground = () => typeof document !== 'undefined' && (document.hidden || !document.hasFocus());
+  WMB.isBackground = () => typeof document !== 'undefined'
+    && (Boolean(document.hidden) || (typeof document.hasFocus === 'function' && !document.hasFocus()));
 
   /**
    * Pause that does NOT freeze in the background: with the tab hidden, the service worker counts the timer
@@ -66,6 +67,79 @@
     return (h >>> 0).toString(36);
   };
 
+  /** Generates a standard UUID v4 for unique request identification. */
+  WMB.generateUuid = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  };
+
+  /**
+   * RequestLifecycle — State machine managing the lifecycle of an MCP tool invocation:
+   *   'queued' -> 'running' -> 'completed' | 'failed' | 'timeout' | 'cancelled'
+   */
+  class RequestLifecycle {
+    constructor(call, { requestId = null } = {}) {
+      this.id = requestId || WMB.generateUuid();
+      this.call = call;
+      this.state = 'queued';
+      this.createdAt = new Date().toISOString();
+      this.startedAt = null;
+      this.finishedAt = null;
+      this.durationMs = 0;
+      this.cached = false;
+      this.result = {
+        stdout: '',
+        stderr: '',
+        exit_code: 0,
+      };
+      this._startTimestamp = null;
+    }
+
+    start() {
+      this.state = 'running';
+      this.startedAt = new Date().toISOString();
+      this._startTimestamp = Date.now();
+      return this;
+    }
+
+    finish({ state = 'completed', stdout = '', stderr = '', exitCode = 0, cached = false, durationMs = null } = {}) {
+      this.state = state;
+      this.finishedAt = new Date().toISOString();
+      this.durationMs = typeof durationMs === 'number'
+        ? Math.round(durationMs)
+        : (this._startTimestamp ? Date.now() - this._startTimestamp : 0);
+      this.cached = Boolean(cached);
+      this.result = {
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? ''),
+        exit_code: typeof exitCode === 'number' ? exitCode : (state === 'completed' ? 0 : 1),
+      };
+      return this;
+    }
+
+    toJSON() {
+      return {
+        request_id: this.id,
+        status: this.state,
+        execution: {
+          started_at: this.startedAt || this.createdAt,
+          finished_at: this.finishedAt || this.createdAt,
+          duration_ms: this.durationMs,
+        },
+        result: this.result,
+        cached: this.cached,
+      };
+    }
+  }
+
+  WMB.RequestLifecycle = RequestLifecycle;
+
   // ───────────────────────── Flexible selectors ─────────────────────────
 
   WMB.isVisible = (el) => Boolean(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
@@ -102,6 +176,46 @@
       } catch { /* noop */ }
     }
     return [];
+  };
+
+  /**
+   * Is this element part of a Writing Block (Canvas, Artifact, document editor, side panel) rather than the chat?
+   *
+   * Only EXPLICIT writing-block containers count. An earlier version also flagged "any contenteditable outside a
+   * <form>" and "any <article>/region without a send button" — which is exactly the chat itself: ChatGPT renders
+   * the composer and every message turn outside a <form>, so the main composer was refused and results were
+   * never written into the chat.
+   */
+  WMB.isWritingBlock = (el) => {
+    if (!el || typeof el.closest !== 'function') return false;
+
+    try {
+      // The chat composer itself is never a writing block, wherever the site puts it.
+      if (el.id === 'prompt-textarea' || el.closest('#prompt-textarea')) return false;
+      const chatForm = el.closest('form');
+      if (chatForm && (chatForm.querySelector('#prompt-textarea') || chatForm.querySelector('button[data-testid*="send" i]'))) return false;
+
+      const blockContainer = el.closest([
+        'aside',
+        '[data-testid*="canvas" i]',
+        '[data-testid*="document" i]',
+        '[data-testid*="artifact" i]',
+        '[data-testid*="code-editor" i]',
+        '.canvas-editor',
+        '.canvas-container',
+        '[class*="canvas" i]',
+        '[class*="editor-panel" i]',
+        '[class*="side-panel" i]',
+        '[data-editor="canvas" i]',
+      ].join(', '));
+      if (blockContainer) return true;
+
+      const testId = el.getAttribute?.('data-testid') || '';
+      const className = String(el.className || '');
+      return el.getAttribute?.('data-editor') === 'canvas' || /canvas|document-editor/i.test(testId) || /canvas-editor|document-editor/i.test(className);
+    } catch {
+      return false; // an exception here must never block the chat: the explicit containers above are the protection
+    }
   };
 
   // ───────────────────────── MCP call parser ─────────────────────────
@@ -232,11 +346,14 @@
    *  - images/audio/blobs → attached files;
    *  - text longer than `maxChars` → attached IN FULL as .txt and an excerpt is left inline.
    * If the attachment fails, `build(false)` leaves ALL the text inline.
+   * `serial` (1-based, optional) is the call's position in a batch: it keeps two results of the SAME
+   * server/tool from attaching files under the SAME name, so each result's markers point at its own file.
    * @returns {{files:object[], build:(attached:boolean)=>string}}
    */
   // The default cap comes from the shared settings (content_scripts/constants.js, generated from shared/).
-  WMB.planResult = (result, { server, name, status, maxChars = WMB.defaults.settings.maxResultChars }) => {
-    const base = `${server}_${name}`.replace(/[^\w.-]+/g, '_').slice(0, 40);
+  WMB.planResult = (result, { server, name, status, maxChars = WMB.defaults.settings.maxResultChars, serial = 0 }) => {
+    const stem = `${server}_${name}`.replace(/[^\w.-]+/g, '_').slice(0, 40);
+    const base = serial ? `${stem}_${serial}` : stem;
     const { parts, files } = WMB.parseResult(result, base);
     const full = WMB.renderParts(parts, true);
     let overflow = null;
@@ -258,7 +375,75 @@
 
   const dom = (WMB.dom = {});
 
-  dom.getText = (el) => ('value' in el ? el.value : (el.innerText || el.textContent || ''));
+  dom.getText = (el) => (!el ? '' : (('value' in el) && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || (typeof HTMLTextAreaElement !== 'undefined' && el instanceof HTMLTextAreaElement))) ? el.value : (el.innerText || el.textContent || ''));
+
+  /**
+   * Completely clears the text box (both textarea and contenteditable / ProseMirror).
+   * Ensures internal framework / React / ProseMirror state recognizes the empty input.
+   * Strictly verifies target and activeElement so Writing Blocks (Canvas/Artifacts) are never touched!
+   */
+  dom.clearText = async (el) => {
+    if (!el || WMB.isWritingBlock?.(el)) return;
+
+    // Blur activeElement if it is currently in a writing block to protect it from any command
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (active && active !== el && WMB.isWritingBlock?.(active)) {
+      try { active.blur(); } catch { /* noop */ }
+    }
+
+    const isInput = el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
+    if (isInput) {
+      try { el.focus(); } catch { /* noop */ }
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, '');
+      else el.value = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
+
+    // contenteditable / ProseMirror
+    try {
+      el.focus();
+      const isTargetFocused = document.activeElement === el || (document.activeElement && el.contains(document.activeElement));
+      const selection = globalThis.getSelection?.() || document?.getSelection?.();
+      const isSelectionInTarget = selection?.anchorNode && (selection.anchorNode === el || el.contains(selection.anchorNode));
+
+      // ONLY call execCommand if el is genuinely focused, selection is inside el, and activeElement is NOT a writing block!
+      if (isTargetFocused && isSelectionInTarget && !WMB.isWritingBlock?.(document.activeElement)) {
+        if (selection && document.createRange) {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          document.execCommand('delete', false, null);
+        }
+      }
+    } catch { /* noop */ }
+
+    // If text still remains (e.g. ProseMirror didn't clear), reset children directly on el
+    if (dom.getText(el).trim().length > 0) {
+      try {
+        if (typeof el.replaceChildren === 'function') {
+          el.replaceChildren();
+          const p = document.createElement('p');
+          p.append(document.createElement('br'));
+          el.append(p);
+        } else {
+          el.innerHTML = '<p><br></p>';
+        }
+      } catch {
+        el.textContent = '';
+      }
+    }
+
+    try {
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch { /* noop */ }
+  };
 
   /** Builds a `File` from `{name, mime, b64}` or `{name, mime, text}`. */
   dom.fileFrom = ({ name, mime, b64, text }) => {
@@ -289,26 +474,133 @@
    * finally a direct assignment are used.
    * @param {{append?:boolean, pasteFirst?:boolean}} options
    */
-  dom.setText = async (el, text, { append = true, pasteFirst = true } = {}) => {
-    el.focus();
+    /**
+   * Safely writes text directly into a contenteditable editor (ProseMirror, etc.) using DOM manipulation.
+   * This is 100% scoped to `el` and CANNOT touch document.activeElement or any Writing Block.
+   */
+  dom.setDirectText = (el, text, { append = true } = {}) => {
+    if (!el || WMB.isWritingBlock?.(el)) return false;
+    const hadText = dom.getText(el).trim().length > 0;
+    const lines = text.split('\n');
 
-    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-      const previous = append ? el.value : '';
-      setter.call(el, previous ? `${previous}\n\n${text}` : text);
+    if (!append || !hadText) {
+      if (typeof el.replaceChildren === 'function') {
+        el.replaceChildren();
+        for (const line of lines) {
+          const p = document.createElement('p');
+          if (line) p.textContent = line;
+          else p.appendChild(document.createElement('br'));
+          el.appendChild(p);
+        }
+      } else {
+        el.innerHTML = lines.map((l) => `<p>${l || '<br>'}</p>`).join('');
+      }
+    } else {
+      for (const line of lines) {
+        const p = document.createElement('p');
+        if (line) p.textContent = line;
+        else p.appendChild(document.createElement('br'));
+        el.appendChild(p);
+      }
+    }
+
+    // The paragraphs above ARE the content: rewriting textContent here would flatten them into a single text node
+    // (and, in a controlled editor, be reverted while still reading back as "written").
+    try {
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch { /* noop */ }
+    return dom.getText(el).length > 0;
+  };
+
+  /**
+   * Writes text into a <textarea> or a contenteditable editor (ProseMirror, Quill, Lexical…)
+   * so that the page framework detects the change.
+   *
+   * Strictly validates target and active element so Writing Blocks (Canvas / Artifacts) are never touched!
+   * @param {{append?:boolean, pasteFirst?:boolean}} options
+   */
+  dom.setText = async (el, text, { append = true, pasteFirst = true } = {}) => {
+    // 1. Target validation: abort immediately if target is missing or a Writing Block
+    if (!el || WMB.isWritingBlock?.(el)) {
+      return false;
+    }
+
+    // 2. Guard against active focus in Writing Blocks: blur immediately to protect it
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (active && active !== el && WMB.isWritingBlock?.(active)) {
+      try { active.blur(); } catch { /* noop */ }
+    }
+
+    const isInput = el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
+    if (isInput) {
+      try { el.focus(); } catch { /* noop */ }
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      const previous = append ? el.value : '';
+      const next = previous ? `${previous}\n\n${text}` : text;
+      if (setter) setter.call(el, next);
+      else el.value = next;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
       el.setSelectionRange?.(el.value.length, el.value.length);
       return true;
     }
 
-    const selection = getSelection();
+    // Try focusing the target element
+    try {
+      el.focus();
+      if (document.activeElement !== el && !el.contains(document.activeElement)) {
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        el.focus();
+      }
+    } catch { /* noop */ }
+
+    const isTargetFocused = () => {
+      const act = document.activeElement;
+      return act === el || Boolean(act && el.contains(act));
+    };
+
+    const isSelectionInTarget = () => {
+      try {
+        const sel = typeof getSelection === 'function' ? getSelection() : document.getSelection();
+        if (!sel || !sel.anchorNode) return false;
+        return sel.anchorNode === el || el.contains(sel.anchorNode);
+      } catch {
+        return false;
+      }
+    };
+
+    // The target is the chat composer (a writing block was refused at the top), so focus and caret are placed
+    // HERE instead of bailing out: a React/ProseMirror composer ignores raw textContent writes, so the direct-DOM
+    // path produced empty sends (the text looked written, the editor state never got it, nothing was submitted).
+    if (WMB.isWritingBlock?.(document.activeElement)) {
+      return dom.setDirectText(el, text, { append });
+    }
+    const getSel = () => (typeof getSelection === 'function' ? getSelection() : document.getSelection?.() ?? null);
+    if (!isSelectionInTarget()) {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
+        const sel = getSel();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      } catch { /* no selection API: the paste/exec paths are skipped below and the direct write is the fallback */ }
+    }
+
+    const selection = getSel();
     const selectAll = () => {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      if (append) range.collapse(false);
-      selection.removeAllRanges();
-      selection.addRange(range);
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        if (append) range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch { /* noop */ }
     };
 
     const hadText = dom.getText(el).trim().length > 0;
@@ -316,6 +608,7 @@
     const wantsBreaks = text.includes('\n');
 
     const paste = async (payload) => {
+      if (!isTargetFocused() || !isSelectionInTarget() || WMB.isWritingBlock?.(document.activeElement)) return;
       selectAll();
       if (!append) { try { document.execCommand('delete'); } catch { /* noop */ } }
       const data = new DataTransfer();
@@ -331,27 +624,27 @@
       if (landed()) return true;
     }
 
-    selectAll();
-    if (!append) document.execCommand('delete');
-    const afterDelete = dom.getText(el).length;
+    // Double check focus and activeElement before execCommand
+    if (isTargetFocused() && isSelectionInTarget() && !WMB.isWritingBlock?.(document.activeElement)) {
+      try {
+        selectAll();
+        if (!append) document.execCommand('delete');
+        const afterDelete = dom.getText(el).length;
 
-    if (append && hadText) {
-      document.execCommand('insertLineBreak');
-      document.execCommand('insertLineBreak');
+        if (append && hadText) {
+          document.execCommand('insertLineBreak');
+          document.execCommand('insertLineBreak');
+        }
+        text.split('\n').forEach((line, i) => {
+          if (i > 0) document.execCommand('insertLineBreak');
+          if (line) document.execCommand('insertText', false, line);
+        });
+        await WMB.sleep(50);
+        if (dom.getText(el).length > afterDelete) return true;
+      } catch { /* no execCommand support: the direct write below is the fallback */ }
     }
-    text.split('\n').forEach((line, i) => {
-      if (i > 0) document.execCommand('insertLineBreak');
-      if (line) document.execCommand('insertText', false, line);
-    });
-    await WMB.sleep(50);
-    if (dom.getText(el).length > afterDelete) return true;
 
-    // Last resort: put the text in with a synthetic paste a second time, then assign it directly.
-    try { await paste(append && hadText ? `\n\n${text}` : text); } catch { /* noop */ }
-    if (landed()) return true;
-
-    el.textContent = append && hadText ? `${dom.getText(el)}\n\n${text}` : text;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-    return dom.getText(el).length > before;
+    // Direct assignment fallback - 100% scoped to el
+    return dom.setDirectText(el, text, { append });
   };
 })();

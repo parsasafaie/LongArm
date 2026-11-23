@@ -44,11 +44,12 @@
     "tool": 150000,
     "deliver": 120000,
     "approval": 300000,
+    "queue": 600000,
     "heartbeat": 10000
   },
     /** REPEAT_CALLS: the window in which an identical call is answered from the previous result. */
     repeat: {
-    "windowMs": 900000,
+    "windowMs": 15000,
     "max": 1
   },
   };

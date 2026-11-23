@@ -135,11 +135,34 @@ def _env_deny() -> list:
 
 # ------------------------------------------------------------------ the command
 
-def _spawn(command: str, cwd: str) -> subprocess.Popen:
+class ExecReport(str):
+    """String report that also carries structured execution data."""
+    structured: dict
+
+    def __new__(cls, text: str, structured: dict):
+        obj = super().__new__(cls, text)
+        obj.structured = structured
+        return obj
+
+
+def _spawn(command: str, cwd: str, shell_override: "str | None" = None) -> subprocess.Popen:
     """Starts the command in a shell, with stdin closed so it can never eat MCP messages."""
-    if SETTINGS.shell:  # an explicit shell wins over the platform default
-        argv: "str | list" = [SETTINGS.shell, "/c" if WIN else "-c", command]
-        extra = {"creationflags": CREATE_NO_WINDOW} if WIN else {"start_new_session": True}
+    chosen_shell = shell_override or SETTINGS.shell
+    if chosen_shell:
+        shell_lower = chosen_shell.lower()
+        if "powershell" in shell_lower or "pwsh" in shell_lower:
+            ps_cmd = (
+                f"$ErrorActionPreference = 'Continue'; {command}; "
+                f"if (!$?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }}"
+            )
+            argv: "str | list" = [
+                chosen_shell if os.path.isabs(chosen_shell) else ("powershell.exe" if WIN else "pwsh"),
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd,
+            ]
+            extra = {"creationflags": CREATE_NO_WINDOW} if WIN else {"start_new_session": True}
+        else:
+            argv = [chosen_shell, "/c" if WIN else "-c", command]
+            extra = {"creationflags": CREATE_NO_WINDOW} if WIN else {"start_new_session": True}
     else:
         argv = command
         if WIN:
@@ -155,14 +178,18 @@ def _spawn(command: str, cwd: str) -> subprocess.Popen:
 def _kill(proc: subprocess.Popen) -> None:
     """Kills the command and whatever it started (same taskkill /T trick the bridge uses)."""
     try:
-        if WIN:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW)
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:  # noqa: BLE001 - already dead or not ours: the plain kill below is enough
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+    if WIN:
         try:
-            proc.kill()
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=2, creationflags=CREATE_NO_WINDOW)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except Exception:  # noqa: BLE001
             pass
 
@@ -198,6 +225,8 @@ def _report(code, out: bytes, err: bytes, elapsed: float, timeout: float, timed_
     if err_more:
         lines.append("(stderr went past the read cap: everything past it was discarded)")
     if timed_out:
+        lines.append("(the command was killed, but it may have partially run or changed files/state: "
+                     "check the current state before retrying the same command)")
         lines.append("(input is closed here, so only non-interactive commands work: anything waiting "
                      "for the keyboard ends up as a timeout)")
     return "\n".join(lines)
@@ -223,7 +252,7 @@ def _pump(stream, limit: int) -> tuple:
             discarded = True
 
 
-def execute(command: str, cwd_arg=None, timeout_arg=None) -> str:
+def execute(command: str, cwd_arg=None, timeout_arg=None, shell_arg=None) -> ExecReport:
     """Runs one command and builds the report the AI reads. Raises ValueError if it was refused."""
     for pattern in SETTINGS.deny:
         if pattern.search(command):
@@ -240,7 +269,7 @@ def execute(command: str, cwd_arg=None, timeout_arg=None) -> str:
 
     started = time.monotonic()
     try:
-        proc = _spawn(command, cwd)
+        proc = _spawn(command, cwd, shell_arg)
     except OSError as err:
         raise ValueError(f"the command could not be started: {err}") from err
 
@@ -263,22 +292,31 @@ def execute(command: str, cwd_arg=None, timeout_arg=None) -> str:
         timed_out = True
         _kill(proc)
         try:
-            proc.wait(timeout=10)  # whatever it printed before dying is already in the readers
+            proc.wait(timeout=2)  # whatever it printed before dying is already in the readers
         except subprocess.TimeoutExpired:
             proc.kill()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
     for reader in readers:
-        reader.join(5)
+        reader.join(2)
     out, out_more = results.get("out", (b"", False))
     err, err_more = results.get("err", (b"", False))
     code = proc.returncode if proc.returncode is not None else -1
     elapsed = time.monotonic() - started
     log(f"{'TIMEOUT' if timed_out else 'exit ' + str(code)} in {elapsed:.2f} s "
         f"(cwd={cwd}, limit={timeout:g} s): {command[:200]}")
-    return _report(code, out, err, elapsed, timeout, timed_out, note, out_more, err_more)
+    report_text = _report(code, out, err, elapsed, timeout, timed_out, note, out_more, err_more)
+    structured = {
+        "stdout": _clip(_decode(out), SETTINGS.max_output).rstrip("\n"),
+        "stderr": _clip(_decode(err), SETTINGS.max_output).rstrip("\n"),
+        "exit_code": code,
+        "duration_ms": round(elapsed * 1000, 2),
+        "timed_out": timed_out,
+        "shell": shell_arg or SETTINGS.shell or ("cmd.exe" if WIN else "/bin/sh"),
+    }
+    return ExecReport(report_text, structured)
 
 
 def terminal_info() -> str:
@@ -346,14 +384,23 @@ def tool_list() -> list:
     ]
 
 
-def call_tool(name: str, args: dict) -> str:
+def call_tool(name: str, args: dict):
     if name == "run_command":
         command = str(args.get("command") or "").strip()
         if not command:
             raise ValueError('"command" is empty: send the command line to run')
-        return execute(command, args.get("cwd"), args.get("timeout"))
+        return execute(command, args.get("cwd"), args.get("timeout"), args.get("shell"))
     if name == "terminal_info":
-        return terminal_info()
+        info = terminal_info()
+        return ExecReport(info, {
+            "stdout": info,
+            "stderr": "",
+            "info": info,
+            "exit_code": 0,
+            "duration_ms": 0,
+            "timed_out": False,
+            "shell": SETTINGS.shell or ("cmd.exe" if WIN else "/bin/sh"),
+        })
     raise KeyError(name)
 
 
@@ -384,8 +431,14 @@ def serve() -> None:
             params = msg.get("params") or {}
             name = params.get("name")
             try:
-                text = call_tool(name, params.get("arguments") or {})
-                reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": False})
+                res = call_tool(name, params.get("arguments") or {})
+                text = str(res)
+                structured = getattr(res, "structured", {})
+                reply(msg_id, {
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": structured,
+                    "isError": False,
+                })
             except KeyError as err:
                 reply(msg_id, {"content": [{"type": "text", "text": f"Error: unknown tool {err}"}], "isError": True})
             except Exception as err:  # noqa: BLE001 - any failure is reported to the AI, never a crash

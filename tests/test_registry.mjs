@@ -31,6 +31,17 @@ assert.equal(registry.repeats(key), 2, 'the replay was counted too');
 // 4) A CHANGED call is a different key: it runs fresh.
 assert.equal(registry.repeats(registry.key('terminal', 'run_command', { command: 'df -h /var' })), 0, 'a changed argument is a different call');
 assert.equal(registry.repeats(registry.key('terminal', 'terminal_info', args)), 0, 'a different tool is a different call');
+// The SAME call with reordered keys is still the same call: the AI must not re-run a side effect by reordering it.
+assert.equal(
+  registry.key('terminal', 'run_command', { b: 2, a: { y: 1, x: 2 } }),
+  registry.key('terminal', 'run_command', { a: { x: 2, y: 1 }, b: 2 }),
+  'object key order does not change the call identity',
+);
+assert.notEqual(
+  registry.key('terminal', 'run_command', { list: [1, 2] }),
+  registry.key('terminal', 'run_command', { list: [2, 1] }),
+  'array order still matters (it changes the arguments)',
+);
 
 // 5) Outside the window the same call runs fresh again.
 const short = new WMB.CallRegistry({ windowMs: 30, max: 1 });

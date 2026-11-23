@@ -84,11 +84,16 @@
   // The backslash pre-pass (layer 0b) and the repaired-JSON layer (2): both run the strict reader's failed
   // candidates through repairObject, and the pre-pass doubles what Markdown ate BEFORE anything parses.
   const DRIVE_PATH = /[A-Za-z]:\\/;
+  // A drive path TOKEN: `C:\Users\name`, `D:\a\b.txt`… It ends at whitespace or a quote. Only the backslash
+  // runs INSIDE it are literal separators; a valid `\"` or `\n` elsewhere in the same string is left alone.
+  const DRIVE_PATH_TOKEN = /[A-Za-z]:\\(?:[^\\\s"'\u201d]|\\.)*/g;
   function fixStringBackslashes(raw) {
-    // A drive path ANYWHERE in the string (`dir C:\...`, `type C:\new\text.txt`): every backslash run in it
-    // is a literal path separator — `\n` in `C:\new` would otherwise decode into a real line break and `\t`
-    // in `\text` into a tab. There is no valid JSON to preserve in such a string: normalize every run to two.
-    if (DRIVE_PATH.test(raw)) return raw.replace(/\\+/g, '\\\\');
+    // A drive path ANYWHERE in the string (`dir C:\...`, `type C:\new\text.txt`): the backslashes in it are
+    // literal separators — `\n` in `C:\new` would otherwise decode into a real line break and `\t` in `\text`
+    // into a tab. ONLY the path token is normalized; escaped quotes/newlines elsewhere stay valid JSON.
+    if (DRIVE_PATH.test(raw)) {
+      return raw.replace(DRIVE_PATH_TOKEN, (token) => token.replace(/\\+/g, (run) => (run.length % 2 === 0 ? run : `${run}\\`)));
+    }
     // No drive: only the escapes JSON would reject are doubled, so deliberate `\n`s survive untouched.
     return raw.replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})|\\/g, (match, valid) => (valid ? match : '\\\\'));
   }
@@ -311,6 +316,42 @@
     return calls;
   }
 
+  /** `"name": "run_command"` — an identifier-shaped tool name: a real attempt, not a quoted placeholder. */
+  const INTENT_RE = /["']?(?:name|tool|tool_name)["']?\s*[:=]\s*["']([A-Za-z0-9_$-]+)["']/;
+  const INTENT_GLOBAL_RE = new RegExp(INTENT_RE.source, 'g');
+
+  /** The `mcp_call` blocks of a text, cut at the next marker: each segment is tried on its own. */
+  function callSegments(raw) {
+    const marks = [];
+    for (let at = raw.indexOf('mcp_call'); at !== -1; at = raw.indexOf('mcp_call', at + 8)) marks.push(at);
+    const segments = [];
+    marks.forEach((at, k) => {
+      const start = raw.lastIndexOf('{', at);
+      if (start === -1) return;
+      segments.push(raw.slice(start, marks[k + 1] ?? raw.length));
+    });
+    return segments;
+  }
+
+  /** Can this ONE segment be read by any layer? (the same order extractMcpCalls uses). */
+  function readSegment(segment, tools) {
+    if (scanCallsText(segment).length) return true;
+    if (repairedCalls(segment).length) return true;
+    if (looseCalls(segment).length) return true;
+    return flagCalls(segment, tools).length > 0;
+  }
+
+  /**
+   * The `mcp_call` blocks that show a real call intent (an identifier name) but cannot be read by ANY layer.
+   * This is what made a mixed batch dangerous: one valid call made `extractMcpCalls` return early, so a
+   * broken sibling vanished without a `format_error` and the AI waited for an answer that never came.
+   * @returns {string[]} the raw segment of each unreadable block (empty when every attempt reads).
+   */
+  WMB.malformedCallBlocks = (rawText, tools = WMB.tools) => {
+    const raw = WMB.normalizeAiText(rawText);
+    return callSegments(raw).filter((segment) => INTENT_RE.test(segment) && !readSegment(segment, tools));
+  };
+
   /** Cleans what renderers and AIs sneak into the text: zero-width characters, odd spaces and HTML entities. */
   WMB.normalizeAiText = (value) => {
     let raw = String(value ?? '').replace(/[\u200b\u200c\u200d\u2060\ufeff]/g, '').replace(/[\u00a0\u2028\u2029]/g, ' ');
@@ -328,12 +369,43 @@
     // `C:\new` as `C:<newline>ew` (a valid JSON escape!) and run the wrong command.
     const fixed = repairBackslashes(raw);
     const strict = scanCallsText(fixed);
-    if (strict.length) return strict;
-    if (!raw.includes('mcp_call')) return [];
-    const repaired = repairedCalls(fixed);
-    if (repaired.length) return repaired;
-    const loose = looseCalls(raw);
-    return loose.length ? loose : flagCalls(raw, tools);
+    if (!raw.includes('mcp_call')) return strict;
+    if (!strict.length) {
+      const repaired = repairedCalls(fixed);
+      if (repaired.length) return repaired;
+      const loose = looseCalls(raw);
+      return loose.length ? loose : flagCalls(raw, tools);
+    }
+    // The strict layer found something, but a message may carry SEVERAL blocks: an early return used to
+    // swallow a repairable/invalid sibling. Read every block on its own and merge (dedup by content).
+    const segments = callSegments(fixed);
+    if (segments.length < 2) return strict;
+    // The strict layer's calls are the baseline. A call found again by a segment is the SAME call (not a
+    // duplicate batch entry); only occurrences BEYOND the strict count are additions. This never loses a
+    // strict call when a marker sits inside a string value, and never collapses a legitimate duplicate.
+    const keyOf = (call) => JSON.stringify([call.server, call.name, call.arguments]);
+    const remaining = new Map();
+    for (const call of strict) remaining.set(keyOf(call), (remaining.get(keyOf(call)) ?? 0) + 1);
+    const merged = [];
+    for (const segment of segments) {
+      let found = scanCallsText(segment);
+      if (!found.length) found = repairedCalls(segment);
+      if (!found.length) found = looseCalls(segment);
+      if (!found.length) found = flagCalls(segment, tools);
+      for (const call of found) {
+        const key = keyOf(call);
+        const left = remaining.get(key) ?? 0;
+        if (left > 0) remaining.set(key, left - 1);
+        merged.push(call);
+      }
+    }
+    // Strict calls a segment could not reach (their marker was inside another value): keep them.
+    for (const call of strict) {
+      const key = keyOf(call);
+      const left = remaining.get(key) ?? 0;
+      if (left > 0) { remaining.set(key, left - 1); merged.push(call); }
+    }
+    return merged.length ? merged : strict;
   };
 
   /**
@@ -344,9 +416,11 @@
   WMB.looksMalformed = (rawText) => {
     const raw = String(rawText);
     if (!raw.includes('mcp_call') || !raw.includes('{')) return false;
-    if (!/["']?(?:name|tool)["']?\s*:/.test(raw)) return false;
-    if (WMB.extractMcpCalls(raw).length) return false;
-    for (const m of raw.matchAll(/["']?(?:name|tool|tool_name)["']?\s*[:=]\s*["']([^"']{1,120})["']/g)) {
+    if (!INTENT_RE.test(raw)) return false;
+    // Some calls may be readable and one block broken: that broken block is still intent (it used to be
+    // swallowed by the early return of the strict/repaired layers).
+    if (WMB.extractMcpCalls(raw).length) return WMB.malformedCallBlocks(raw).length > 0;
+    for (const m of raw.matchAll(INTENT_GLOBAL_RE)) {
       if (/^[A-Za-z0-9_$-]+$/.test(m[1])) return true;
     }
     return false;
@@ -375,5 +449,5 @@
   WMB.diagnoseMcp = diagnose;
 
   /** Message returned to the AI when its block could not be read. */
-  WMB.formatCallError = (raw) => `[MCP_RESULT server="bridge" tool="mcp_call" status="format_error"]\nNothing was run: your mcp_call block could not be read. Reason: ${diagnose(String(raw))}.\nResend ONLY the corrected block: ONE message, inside \`\`\`json, on ONE single line, with ONE call and nothing before or after it. Rules: paths with "/" (C:/Users/...), inner quotes as \\", line breaks as \\n, no comments, no trailing commas, no text inside the JSON. For long scripts, first write a file with a tool and then run it.\nFormat: {"mcp_call":{"server":"<server>","name":"<tool>","arguments":{}}}\n[/MCP_RESULT]`;
+  WMB.formatCallError = (raw) => `[MCP_RESULT server="bridge" tool="mcp_call" status="format_error"]\nThis block was not executed: it could not be read. Reason: ${diagnose(String(raw))}.\nCalls in the SAME message that were readable may already have run: do not resend them. Resend ONLY this corrected block: ONE message, inside \`\`\`json, on ONE single line, with ONE call and nothing before or after it. Rules: paths with "/" (C:/Users/...), inner quotes as \\", line breaks as \\n, no comments, no trailing commas, no text inside the JSON. For long scripts, first write a file with a tool and then run it.\nFormat: {"mcp_call":{"server":"<server>","name":"<tool>","arguments":{}}}\n[/MCP_RESULT]`;
 })();

@@ -4,7 +4,7 @@
 // deltas live in `scripts/browsers.json` and are applied by the builders. Both are checked here, so a bad
 // override fails in CI instead of at load time.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { BROWSERS_LIST, manifestFor, readCanonicalManifest } from './manifest.mjs';
 
@@ -73,7 +73,7 @@ const anchors = (path) => new Set(
     .map((line) => slug(line.replace(/^#{1,6}\s+/, ''))),
 );
 for (const file of docs) {
-  const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '.';
+  const dir = dirname(file);
   const text = readFileSync(file, 'utf8').replace(/```[\s\S]*?```/g, ''); // links inside examples are not links
   for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
     const target = match[1];

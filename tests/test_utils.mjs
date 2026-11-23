@@ -81,4 +81,29 @@ assert.match(plan.build(true), /FULL content in the attached file s_t_full\.txt/
 assert.ok(plan.build(false).includes(long), 'without an attachment, the full text goes inline');
 assert.equal(WMB.planResult({ content: [{ type: 'text', text: 'short' }] }, { server: 's', name: 't', status: 'ok' }).files.length, 0);
 
+// 12) UUID & RequestLifecycle State Machine
+const uuid1 = WMB.generateUuid();
+const uuid2 = WMB.generateUuid();
+assert.equal(typeof uuid1, 'string');
+assert.equal(uuid1.length, 36);
+assert.notEqual(uuid1, uuid2);
+
+const lifecycle = new WMB.RequestLifecycle({ server: 'terminal', name: 'run', arguments: { command: 'dir' } });
+assert.equal(lifecycle.state, 'queued');
+assert.ok(lifecycle.id);
+lifecycle.start();
+assert.equal(lifecycle.state, 'running');
+assert.ok(lifecycle.startedAt);
+lifecycle.finish({ state: 'completed', stdout: 'output', stderr: '', exitCode: 0, durationMs: 42 });
+assert.equal(lifecycle.state, 'completed');
+assert.equal(lifecycle.durationMs, 42);
+
+const payload = lifecycle.toJSON();
+assert.equal(payload.request_id, lifecycle.id);
+assert.equal(payload.status, 'completed');
+assert.equal(payload.result.stdout, 'output');
+assert.equal(payload.result.stderr, '');
+assert.equal(payload.result.exit_code, 0);
+assert.equal(payload.cached, false);
+
 console.log('✔ test_utils: all checks passed');

@@ -7,7 +7,8 @@ TURN IT ON, RESTART IT and TURN IT OFF from its panel (an extension cannot launc
   python  start_bridge_loop.pyw --ctl ACTION   -> ACTION = start | stop | restart | status | quit
 
 "Stop" leaves the bridge off until "Start" is pressed (the .paused marker survives PC restarts).
-Security: it only serves the extension (Origin chrome-extension://) or clients without Origin (CLI), and only with a local Host.
+Security: it only serves the LongArm extension id (pinned in the manifest, or `allowed_extension_ids`) or clients
+without Origin (CLI), and only with a local Host. Any other chrome-extension:// origin is rejected.
 """
 import json
 import os
@@ -26,7 +27,32 @@ CONFIG = os.path.join(DIR, "servers.json")
 PAUSED_FILE = os.path.join(DIR, ".paused")
 DEFAULT_CONTROL_PORT = 8099
 DEFAULT_LAUNCHER_PORT = 8098
-ALLOWED_ORIGIN_PREFIXES = ("chrome-extension://",)
+# Same pinned id as the bridge/manifest: a bare `chrome-extension://` prefix would let ANY extension
+# start/stop the bridge and read its status.
+DEFAULT_EXTENSION_ID = "ilnjjdjoklladplnidbfmcjgalkmigjn"
+
+
+def _extension_ids(data=None):
+    """servers.json `allowed_extension_ids` → WMB_EXTENSION_IDS → the id pinned in the manifest."""
+    raw = (data or {}).get("allowed_extension_ids") if isinstance(data, dict) else None
+    if isinstance(raw, list) and raw:
+        ids = tuple(str(x).strip().lower() for x in raw if str(x).strip())
+        if ids and all(len(x) == 32 and all("a" <= ch <= "p" for ch in x) for x in ids):
+            return ids
+    env = os.environ.get("WMB_EXTENSION_IDS", "")
+    ids = tuple(x.strip().lower() for x in env.split(",") if x.strip())
+    return ids or (DEFAULT_EXTENSION_ID,)
+
+
+def _origin_id(origin):
+    prefix = "chrome-extension://"
+    if not origin or not origin.startswith(prefix):
+        return ""
+    return origin[len(prefix):].split("/", 1)[0].lower()
+
+
+def _origin_allowed(origin, allowed_ids):
+    return origin is None or _origin_id(origin) in allowed_ids
 
 
 def _log(msg):
@@ -67,10 +93,15 @@ def http_json(method, port, path, timeout=4):
 def spawn_bridge(launcher):
     """Starts the bridge and waits for it to finish. Returns its exit code."""
     # WMB_SUPERVISED=1: if the bridge restarts from the extension, it just exits and this loop brings it back up.
-    done = subprocess.run([PY, "mcp_ws_bridge.py", "--config", launcher.config, "--log-file", LOG], cwd=DIR,
-                          env={**os.environ, "WMB_SUPERVISED": "1"},
-                          creationflags=0x08000000 if sys.platform == "win32" else 0)
-    return done.returncode
+    proc = subprocess.Popen([PY, "mcp_ws_bridge.py", "--config", launcher.config, "--log-file", LOG], cwd=DIR,
+                            env={**os.environ, "WMB_SUPERVISED": "1"},
+                            creationflags=0x08000000 if sys.platform == "win32" else 0)
+    launcher.proc = proc
+    try:
+        return proc.wait()
+    finally:
+        if launcher.proc is proc:
+            launcher.proc = None
 
 
 class Launcher:
@@ -80,6 +111,7 @@ class Launcher:
         self.spawn = spawn
         self.wake = threading.Event()
         self.quit = threading.Event()
+        self.proc = None  # the bridge child while spawn_bridge is waiting for it
 
     @property
     def control_port(self):
@@ -120,6 +152,21 @@ class Launcher:
     def do_stop(self):
         self.set_paused(True)
         http_json("POST", self.control_port, "/shutdown")
+        # Stop pressed WHILE the bridge is still starting (usually the spawn is doing the port check): a
+        # graceful shutdown request cannot reach it yet, so the child is stopped directly.
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
         self.wake.set()
 
     def do_restart(self):
@@ -165,13 +212,13 @@ class Handler(BaseHTTPRequestHandler):
     def _allowed(self):
         origin = self._origin()
         host = (self.headers.get("Host") or "").split(":")[0].lower()
-        return host in ("127.0.0.1", "localhost") and (origin is None or origin.startswith(ALLOWED_ORIGIN_PREFIXES))
+        return host in ("127.0.0.1", "localhost") and _origin_allowed(origin, _extension_ids(read_config()))
 
     def _reply(self, status, payload=None):
         body = b"" if payload is None else json.dumps(payload).encode("utf-8")
         self.send_response(status)
         origin = self._origin()
-        if origin and origin.startswith(ALLOWED_ORIGIN_PREFIXES):
+        if origin and _origin_allowed(origin, _extension_ids(read_config())):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Private-Network", "true")

@@ -154,7 +154,10 @@
   function isBridgeMessage(text) {
     const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
     const ranges = planHiddenRanges(flat);
-    return ranges.length > 0 && !remainingText(flat, ranges).trim();
+    if (ranges.length > 0 && !remainingText(flat, ranges).trim()) return true;
+    // Gemini renders a result as `You said [MCP_RESULT …]…`: still the extension's own message. The adapters
+    // use this to refuse to read a call out of a result (a result is data, never a new request).
+    return PREFIXED_RESULT_START.test(flat) && RESULT_END.test(flat);
   }
 
   // ───────────────────────── The AI's own call ─────────────────────────
@@ -172,7 +175,7 @@
   const EDGE_CHROME = /^(?:copy(?: code)?|code|json)\s*|\s*(?:copy(?: code)?|code|json)$/gi;
 
   /**
-   * Is this text NOTHING but one `mcp_call` object? A fence around it is tolerated (that is how the protocol asks
+   * Is this text NOTHING but one or more `mcp_call` objects? A fence around it is tolerated (that is how the protocol asks
    * for it), and so is the caption a rendered code block may carry around it (`JSON`, `Copy code`). Anything else
    * — prose, a quote of the format, an echo of the frame — is not a call.
    */
@@ -181,14 +184,41 @@
       .replace(/^```[a-z0-9_-]*\s*/i, '').replace(/\s*```$/, '')
       .replace(EDGE_CHROME, '')
       .trim();
-    if (!bare.startsWith('{') || !bare.endsWith('}') || !bare.includes('mcp_call')) return false;
-    let parsed;
-    for (const candidate of [bare, bare.replace(/[\u201c\u201d\u201e\u2033]/g, '"')]) {
-      try { parsed = JSON.parse(candidate); break; } catch { /* try the next form */ }
+    if (!bare.includes('mcp_call')) return false;
+
+    // Single JSON object
+    if (bare.startsWith('{') && bare.endsWith('}')) {
+      let parsed;
+      for (const candidate of [bare, bare.replace(/[\u201c\u201d\u201e\u2033]/g, '"')]) {
+        try { parsed = JSON.parse(candidate); break; } catch { /* try the next form */ }
+      }
+      const call = parsed?.mcp_call;
+      if (call && typeof call.name === 'string' && call.name) {
+        return !isFrameValue(call.name) && !isFrameValue(call.server);
+      }
     }
-    const call = parsed?.mcp_call;
-    if (!call || typeof call.name !== 'string' || !call.name) return false;
-    return !isFrameValue(call.name) && !isFrameValue(call.server);
+
+    // Array of calls: [ {"mcp_call": ...}, ... ]
+    if (bare.startsWith('[') && bare.endsWith(']')) {
+      let parsed;
+      for (const candidate of [bare, bare.replace(/[\u201c\u201d\u201e\u2033]/g, '"')]) {
+        try { parsed = JSON.parse(candidate); break; } catch { /* try next */ }
+      }
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.every((item) => {
+          const call = item?.mcp_call;
+          return call && typeof call.name === 'string' && call.name && !isFrameValue(call.name) && !isFrameValue(call.server);
+        });
+      }
+    }
+
+    // Multiple JSON call objects (e.g. newline-delimited JSON objects where each line is a pure call)
+    const lines = bare.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length >= 2 && lines.every((l) => isPureCall(l))) {
+      return true;
+    }
+
+    return false;
   }
 
   // ───────────────────────── DOM ─────────────────────────

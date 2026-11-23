@@ -1,19 +1,22 @@
 {
   "name": "longarm",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MV3 extension that connects ChatGPT, Gemini and Claude Web with local MCP servers.",
+  "description": "MV3 extension that connects ChatGPT, Gemini, Claude and DeepSeek Web with local MCP servers.",
   "scripts": {
     "check": "node scripts/check.mjs",
     "instructions": "node scripts/build_instructions.mjs",
     "constants": "node scripts/build_constants.mjs",
-    "test": "node scripts/check.mjs && node tests/test_manifest.mjs && node tests/test_adapters.mjs && node tests/test_constants.mjs && node tests/test_protocol.mjs && node tests/test_utils.mjs && node tests/test_parser.mjs && node tests/test_json_battery.mjs && node tests/test_prompt.mjs && node tests/test_background.mjs && node tests/test_hide_dom.mjs && node tests/test_registry.mjs && node tests/test_ws_client.mjs && node tests/test_ui_widget.mjs && node scripts/run_python.mjs",
+    "test": "node scripts/check.mjs && node scripts/run_tests.mjs && node scripts/run_python.mjs",
     "release": "node scripts/release.mjs",
     "pack": "node scripts/pack.mjs"
   },
   "license": "MIT",
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
   }
 }
