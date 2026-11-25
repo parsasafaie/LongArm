@@ -68,7 +68,7 @@ try:  # websockets >= 13
 except ImportError:  # websockets 12
     from websockets import serve as ws_serve  # type: ignore[assignment]
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_CONTROL_PORT = 8099
 log = logging.getLogger("mcp_ws_bridge")
 

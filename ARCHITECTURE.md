@@ -249,12 +249,30 @@ placeholder from the instructions is ignored, without an answer).
   Manually clearing the composer plus an unrelated new message is not a send, and Regenerate is a live
   turn but not a send (`markActivity({trustedSend:false})`).
 
-### 1.5 Hiding protocol text (hide.js)
+### 1.5 Compact protocol text (hide.js)
 
 Display-only cleanup, on by default. It recognises the two kinds of text the bridge puts on a page:
 `[MCP_RESULT …]` messages (the whole protocol) and the AI's pure `mcp_call` replies. Nothing is deleted
 from the DOM; turning the option off restores everything byte for byte. Detection is selector-free
 (XPath over text nodes) so a site redesign cannot break it.
+
+A hidden result leaves one short terminal-style line in its place — `▸ ● MCP terminal › run_command`,
+plus the status when it is not ok; a batch gets one line per block, each inserted as the extension's own
+node before the hidden message together with its detail (the result's body, or the call's JSON). A
+hidden call shows the same line with `running`, but only when core_bridge reports that the call really
+started (the adapter's detection): a call already sitting in a reopened chat was never detected, so it
+can never claim to be running. A line is withdrawn on the next pass when its call stops being the newest
+message, and removed at once when the bridge reports that the call will get no result (an ignored
+placeholder, a failed delivery, a conversation that moved on). The result's line replaces the running
+one (matched by server and tool, by the tool alone for a wrong-server notice, and only within the same
+tree), so one call never leaves two lines. Clicking a line (or Enter) opens that line's own detail right
+under it — never its neighbours' — and clicking again tucks it away. The line and its detail are the
+extension's own nodes and are never scanned as messages (the detail holds the call's `mcp_call`; treating
+it as a call would add another line on every pass); lines whose message the site re-rendered away are
+pruned on the next pass, and a `running` line whose result never arrives says `no result` after the
+queue's own 10-minute bound. A message whose blocks are all calls is hidden whole, so a batch never
+leaves an empty bubble behind. A call is no longer assumed to be short: past 8 000 characters only
+call-shaped text is indexed, and 128 KB is the hard bound.
 
 Two site-shaped details it handles: a **label in front of the user's sent text** (Gemini renders
 `You said [MCP_RESULT …]…` — a message that is a user turn, starts within 32 chars with the wrapper

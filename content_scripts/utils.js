@@ -5,7 +5,7 @@
 (() => {
   'use strict';
   const WMB = (globalThis.WMB = globalThis.WMB || {});
-  WMB.VERSION = '0.1.0';
+  WMB.VERSION = '0.2.0';
 
   const nativeSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

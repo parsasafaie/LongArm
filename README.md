@@ -95,7 +95,7 @@ Drag the bar anywhere; double-click it to put it back in its corner.
 | **Default permission** | One three-way control (*Allow* · *Ask* · *Deny*) for every server at once; unselected when they differ. |
 | One **card per server** | Its switch, state, address and tool count, plus the same three-way control for that server alone. The highlighted left edge means enabled. |
 
-The **Activity** page lists the calls that have been run (server, tool, outcome, time). The **Settings** page holds the extension's switches — *Enable discovered servers*, *Send results automatically*, *Keep the chat clean*, *Wake the tab if it gets stuck* — and the maximum characters per result. Its header has **Copy diagnostics**: a JSON snapshot (version, bridge, servers, settings, recent calls) for a bug report.
+The **Activity** page lists the calls that have been run (server, tool, outcome, time). The **Settings** page holds the extension's switches — *Enable discovered servers*, *Send results automatically*, *Compact tool results*, *Wake the tab if it gets stuck* — and the maximum characters per result. Its header has **Copy diagnostics**: a JSON snapshot (version, bridge, servers, settings, recent calls) for a bug report.
 
 The switch at the bottom of the rail is the **master switch of the extension**, not the same as *Stop*: it only makes the extension stop acting (the toolbar badge shows `OFF`), while *Stop* closes the **program** on your computer.
 

@@ -40,10 +40,11 @@ export const DEFAULT_SETTINGS = {
   /** Maximum characters of a result inside the message. Anything over it is attached COMPLETE as a file (it is never truncated). */
   maxResultChars: 12000,
   /**
-   * Keeps everything the bridge types into the page out of sight: the tool results, the tool list the AI asked
-   * for, and the notices about a wrong name or an unreadable call. All of it is still SENT to the AI (hiding is
-   * display-only, the text stays in the DOM), and turning this off shows it again. On by default: the chat stays
-   * the conversation itself. Anything the extension wrote but no longer writes (an instruction block, a
+   * Keeps the protocol text out of sight: every tool result (the tool list and the notices too) becomes one short
+   * terminal-style line saying which tool ran, clickable to show the raw result; a call the bridge actually starts
+   * shows the same line as `running`, and the result's line replaces it. All of it is still SENT to the AI (the
+   * text stays in the DOM, display-only), and turning this off shows everything again. On by default: the chat
+   * reads like a coding tool. Anything the extension wrote but no longer writes (an instruction block, a
    * reminder) is recognised and hidden too, so older chats come out clean as well.
    */
   hideProtocol: true,

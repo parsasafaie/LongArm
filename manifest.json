@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LongArm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Connects ChatGPT, Gemini, Claude and web LLMs with local MCP servers over WebSocket.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2iIkXJ4dmNPFOW5eD3j+hLzCl78UkVhqYPl94Q0X2iaUaKdBUdZ08+dVW+JQjUgm3QtLmW9Pn2PW9ueYjzVrqzUpai8UkpIfHvHh02zR0JfgyZCuE2DwXW/HLm/ewtqGmhU9l7dbT2mGAyPR0wB5qmLFiYLK1ocPWM2ALCPXsGheNsj5wPQDnKI3/47lrSy8YqZBo4yXKSZeetHnccHf4l5Jf0Lt3BFn0YkT0YrPb6/6T0ZUUKBpzvl8Zb/97Gx/Lo7K2bhFO/2CyjVHxZudKVAvQjSDZ8D/2F5AZN16boPHf08Ns950vLYxPHO1GQlzFtB3x77z0UtCSaNIQ1SDuQIDAQAB",
   "minimum_chrome_version": "116",

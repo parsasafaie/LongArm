@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 
 // The module reads the extension version through chrome.*; a stand-in is enough here.
-globalThis.chrome = { runtime: { getManifest: () => ({ version: '0.1.0' }) } };
+globalThis.chrome = { runtime: { getManifest: () => ({ version: '0.2.0' }) } };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

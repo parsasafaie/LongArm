@@ -44,7 +44,8 @@ Two more things worth knowing:
 - **Batches are for independent calls.** Asking for two reads in one message is fine; a call that needs
   the previous answer must wait for its result. The extension runs a batch in order and answers every
   call, even when one of them is refused or fails.
-- **Clean chat is only about display.** With *Keep the chat clean* on (Settings → *The chat*), the
-  tool results, the tool list and the notices are kept out of sight, and so is the AI's `mcp_call`
-  message — the AI still receives all of it. Turning it off puts everything back on screen; it has
-  nothing to do with installing this text.
+- **Compact results are only about display.** With *Compact tool results* on (Settings → *The chat*),
+  each tool result is shown as one short terminal-style line (server, tool, status) that opens its own
+  detail right under it; a call shows the same line as running until its result replaces it, and the
+  AI's `mcp_call` message is kept out of sight — the AI still receives all of it. Turning it off puts
+  the raw protocol messages back on screen; it has nothing to do with installing this text.

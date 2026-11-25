@@ -178,19 +178,19 @@
    * If there are multiple calls in the batch, each result is wrapped in its own [MCP_RESULT ...] block.
    */
   async function deliverBatch(items, callIds = [], conversation = null, turn = null) {
-    if (!items.length) return;
+    if (!items.length) return { ok: true };
     const { autoSend, maxResultChars } = state.settings;
 
     // The conversation moved on while the calls were running: the results belong to the conversation that asked.
     // Delivering them here would type an answer into a chat that never asked for it.
     if (!adapter.isSameConversation(conversation)) {
       widget.log('err', `${items.length > 1 ? 'Results' : 'Result'} dropped: this page is now in another conversation, so the answer belongs to the one that asked (its own tab has it).`);
-      return;
+      return { ok: false, error: 'another conversation' };
     }
     // ...or the USER started a new turn while the tool ran: the old result would answer the new prompt.
     if (adapter.isSameTurn && !adapter.isSameTurn(turn)) {
       widget.log('err', `${items.length > 1 ? 'Results' : 'Result'} dropped: the user started a new turn, so this answer belongs to the previous one.`);
-      return;
+      return { ok: false, error: 'a new turn' };
     }
 
     const planned = items.map(({ srv, call, result }, i) => {
@@ -232,6 +232,7 @@
     });
     const label = planned.length > 1 ? `${planned.length} results` : 'Result';
     widget.log(sent.ok ? 'ok' : 'err', sent.ok ? `${label} sent to ${adapter.name}.` : sent.error);
+    return sent;
   }
 
   /** Backwards-compatible single deliver helper. */
@@ -316,7 +317,7 @@
   async function answerListTools(callIds = [], conversation = null, turn = null) {
     widget.log('ok', 'The AI asked for the tool list: sending it.');
     const text = await listToolsText();
-    await guarded(
+    return guarded(
       deliverBatch([{ srv: { slug: BRIDGE_SERVER }, call: { name: 'list_tools' }, result: { status: 'ok', text, raw: { content: [{ type: 'text', text }] } } }], callIds, conversation, turn),
       DELIVER_TIMEOUT_MS,
       'The chat did not accept the tool list in time.',
@@ -665,6 +666,10 @@
       if (inFlight.has(detectedId)) return;
       inFlight.add(detectedId);
     }
+    // A call that gets no result (ignored, dropped, delivery failed) must not keep its `running` line.
+    const dropLines = (call = null) => {
+      try { WMB.hide?.dropped?.(detected.element, call); } catch { /* display only: never break the call */ }
+    };
     try {
       // The conversation this detection belongs to: every result of this turn is delivered there or nowhere.
       // The adapter captures it at DETECTION time; falling back to the current URL only covers old callers.
@@ -673,10 +678,14 @@
 
       // The bridge's own call, answered before any server is looked up: asking for the tools is always allowed.
       if (calls.length === 1 && isListTools(calls[0])) {
-        await answerListTools(detected.ids ?? [], conversation, turn);
+        try { WMB.hide?.running?.(detected.element); } catch { /* display only: never break the call */ }
+        let delivered = null;
+        try { delivered = await answerListTools(detected.ids ?? [], conversation, turn); }
+        finally { if (!delivered?.ok) dropLines(); }
         return;
       }
       if (!state.settings.bridgeEnabled) return; // bridge off: real calls are ignored
+      try { WMB.hide?.running?.(detected.element); } catch { /* display only: never break the call */ }
 
       const total = calls.length;
       const deadline = Date.now() + QUEUE_BUDGET_MS; // approvals + reconnects + tools for the WHOLE batch
@@ -684,6 +693,7 @@
       for (let i = 0; i < total; i += 1) {
         const item = await executeCall(calls[i], i, total, deadline, conversation);
         if (item) executed.push(item);
+        else dropLines(calls[i]); // a placeholder, or the queue budget: this call gets no result
       }
 
       if (!executed.length) return;
@@ -692,12 +702,16 @@
         executed[0].result.note = `LongArm: only the first call was run; ${detected.extra} more were ignored.`;
       }
 
-      await guarded(deliverBatch(executed, detected.ids ?? [], conversation, turn), DELIVER_TIMEOUT_MS, 'The chat did not accept the results in time.');
+      const delivered = await guarded(deliverBatch(executed, detected.ids ?? [], conversation, turn), DELIVER_TIMEOUT_MS, 'The chat did not accept the results in time.');
+      if (!delivered?.ok) dropLines();
       // A readable call next to an unreadable block: the run results went out above and the broken block gets
       // its `format_error` too, so nobody is left waiting for an answer that silently vanished.
       if (detected.badText && !detected.malformed) {
         await handleMalformed({ text: detected.badText, conversation, turn });
       }
+    } catch (error) {
+      dropLines(); // an unexpected failure: every line of this message is stale now
+      throw error;
     } finally {
       if (detectedId !== null) inFlight.delete(detectedId);
     }

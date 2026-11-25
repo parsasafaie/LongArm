@@ -131,6 +131,13 @@ assert.equal(WMB.isPureCall('JSON\n{"mcp_call":{"server":"terminal","name":"run"
 assert.equal(WMB.isPureCall('{"mcp_call":{"server":"terminal","name":"run","arguments":{}}}\nCopy code'), true, 'a trailing caption too');
 assert.equal(WMB.isPureCall('{“mcp_call”:{“server”:“terminal”,“name”:“run”}}'), true, 'typographic quotes (a smart-quote renderer) parse too');
 assert.equal(WMB.isPureCall('{\n  "mcp_call": {\n    "server": "terminal",\n    "name": "run"\n  }\n}'), true, 'pretty-printed JSON');
+const CALL_A = '{"mcp_call":{"server":"terminal","name":"run","arguments":{"command":"date"}}}';
+const CALL_B = '{"mcp_call":{"server":"terminal","name":"run","arguments":{"command":"pwd"}}}';
+assert.equal(WMB.isPureCall(`${CALL_A}\n${CALL_B}`), true, 'two calls, one per line (the batch protocol)');
+assert.equal(WMB.isPureCall(`${CALL_A} ${CALL_B}`), true, 'two calls after the page collapsed the line break into a space');
+assert.equal(WMB.isPureCall(`\`\`\`json\n${CALL_A}\n\`\`\`\n\n\`\`\`json\n${CALL_B}\n\`\`\``), true, 'one fenced block per call');
+assert.equal(WMB.isPureCall(`${CALL_A}\nok?\n${CALL_B}`), false, 'prose between two calls is left alone');
+assert.equal(WMB.isPureCall('{"mcp_call":{"server":"terminal","name":"run","arguments":{"command":"echo } {"}}} ' + CALL_B), true, 'a brace inside an argument does not split the call');
 assert.equal(WMB.isPureCall('mcp_call'), false, 'the bare word is not a call');
 assert.equal(WMB.isPureCall('Sure — running it now:\n{"mcp_call":{"name":"run"}}'), false, 'prose around the call is left alone');
 assert.equal(WMB.isPureCall('use {"mcp_call": … } to call a tool'), false, 'a quote of the format is not a call');

@@ -22,7 +22,7 @@ globalThis.chrome = {
   },
   runtime: {
     onMessage: { addListener: (fn) => { onMessage = fn; } }, onInstalled: { addListener: (fn) => { installed = fn; } },
-    getManifest: () => ({ version: '0.1.0' }),
+    getManifest: () => ({ version: '0.2.0' }),
   },
   action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
   alarms: { create() {}, onAlarm: { addListener() {} } },
@@ -84,7 +84,7 @@ assert.equal((await call({ type: 'GET_ACTIVE_TOOLS' })).tools.length, 0);
 await chrome.storage.local.set({ wmb_servers: [
   { id: 'auto1', name: 'demo_mcp', url: 'ws://127.0.0.1:8080', enabled: true, permission: 'allow', auto: true },
 ] });
-bridgeProbe = { ok: true, version: '0.1.0', pid: 1, config_error: 'malformed JSON (line 3, column 1)', servers: [] };
+bridgeProbe = { ok: true, version: '0.2.0', pid: 1, config_error: 'malformed JSON (line 3, column 1)', servers: [] };
 const discovery = await call({ type: 'DISCOVER' });
 assert.equal(discovery.ok, false, 'discovery reports the invalid config instead of pretending success');
 assert.match(discovery.error, /invalid/i);

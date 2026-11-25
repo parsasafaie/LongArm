@@ -76,7 +76,7 @@ def main():
             assert set(found) == {"one", "two"} and all(s["status"] == "listening" for s in found.values()), found
             assert found["one"]["url"] == "ws://127.0.0.1:18771", found
             info = call("GET", "/servers")[1]
-            assert info["config_error"] is None and info["version"] == "0.1.0", info
+            assert info["config_error"] is None and info["version"] == "0.2.0", info
 
             # A website can NOT read or shut down the bridge
             assert call("GET", "/servers", origin="https://chatgpt.com")[0] == 403
