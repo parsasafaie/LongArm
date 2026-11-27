@@ -121,6 +121,12 @@
   /** What makes text a message instead of small print: a paragraph, a list, a table, a code block. A caption,
    *  a label or a button word never is one, and that difference is what tells a message from a block inside it. */
   const CONTENT_SEL = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, table, pre';
+  /** A label nobody sees (a screen-reader heading, a hidden note) is small print, not content: it must not keep a
+   *  message from being hidden — ChatGPT's turn carries `<h5 class="sr-only">ChatGPT said:</h5>` like this. */
+  const VISUALLY_HIDDEN = '.sr-only, .visually-hidden, .screen-reader-only, [hidden]';
+  /** Subtrees whose text is never a message: site scripts hold the conversation data too (RSC/JSON payloads), and
+   *  indexing them would be wrong as well as huge. */
+  const NOT_TEXT_SEL = 'script, style, noscript, template';
 
   const COLLAPSE = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
@@ -295,6 +301,22 @@
     return parsePureCalls(text) !== null;
   }
 
+  /**
+   * The call values of ANY text, with their ranges: a reply that puts a sentence before its calls is still a
+   * request (the parser runs it), so its JSON must be hidden too — but only the JSON, never the words around it.
+   * @returns {{start:number,end:number,calls:{server:string,name:string,json:string}[]}[]}
+   */
+  function callParts(text) {
+    const ranges = jsonValueRanges(text);
+    if (!ranges) return [];
+    const parts = [];
+    for (const range of ranges) {
+      const calls = callsOfValue(text.slice(range.start, range.end));
+      if (calls) parts.push({ start: range.start, end: range.end, calls });
+    }
+    return parts;
+  }
+
   // ───────────────────────── DOM ─────────────────────────
 
   /**
@@ -378,7 +400,9 @@
   /** Does this element hold text of its own that is content — a paragraph — rather than small print? */
   function addsContent(parent, target) {
     for (const el of parent.querySelectorAll(CONTENT_SEL)) {
-      if (!el.contains(target) && !target.contains(el)) return true;
+      if (el.contains(target) || target.contains(el)) continue;
+      if (el.matches(VISUALLY_HIDDEN)) continue; // a label nobody sees is not content riding along
+      return true;
     }
     return false;
   }
@@ -404,11 +428,11 @@
    * plus the few characters of small print a bubble may add (a "You said:" label, a button caption, a code-block
    * header) — because the element the text was found in is NOT where hiding stops: the bubble and its box usually
    * sit above it, and stopping there would leave an empty bubble on screen.
-   * `whole` = the element carries the whole message. When it is only a block inside a longer reply (prose around
-   * the call), the climb stops at that block: a wrapper that adds a paragraph is the message itself, and the
-   * message is not ours to hide.
+   * A wrapper that adds CONTENT — a paragraph, a list, a table, another code block — is the message itself or a
+   * neighbouring one, so the climb stops there: prose is never swallowed with a call, however short it is. That
+   * holds for a whole message too: its own paragraphs sit INSIDE the target, so they never stop the climb.
    */
-  function messageElement(el, whole = true) {
+  function messageElement(el) {
     let target = el;
     let own = COLLAPSE(target.textContent);
     let budget = CHROME_CHARS;
@@ -418,19 +442,53 @@
       if (parent.id === HOST_ID || parent.querySelector(COMPOSER_SEL)) break;
       if (parent.matches(NEVER_HIDE_SEL)) break;
       if (holdsAnotherMessage(parent, target)) break;
+      if (addsContent(parent, target)) break;
       const all = COLLAPSE(parent.textContent);
       if (!all.includes(own)) break;
       budget -= all.split(own).join('').length; // everything the wrapper adds on top of the message
       if (budget < 0) break;
-      if (!whole && addsContent(parent, target)) break;
       target = parent;
     }
     return target;
   }
 
+  /**
+   * The smallest element around a call text that ALSO carries other text (a lead-in sentence, a label). The call
+   * is still a request — the parser runs it — but the element is not nothing but calls, so hiding it whole would
+   * swallow prose: only the JSON ranges go. Null when no whole call sits in the element.
+   */
+  function findInline(node) {
+    let el = node.parentElement;
+    for (let depth = 0; el && depth < 6 && el !== document.body && el !== document.documentElement; depth += 1, el = el.parentElement) {
+      if (el.id === HOST_ID) return null;
+      if (el.closest(`[${CHIP_ATTR}], [${DETAIL_ATTR}], ${NOT_TEXT_SEL}`)) return null;
+      if (el.closest(USER_SEL)) return null; // the user's own text is never ours
+      if (el.closest(EDITABLE_SEL) && !el.closest(`${MESSAGE_SEL}, ${ASSISTANT_SEL}, ${USER_SEL}`)) return null;
+      if (el.closest('form') && !el.closest(`${MESSAGE_SEL}, ${ASSISTANT_SEL}, ${USER_SEL}`)) return null;
+      const text = el.textContent ?? '';
+      if (text.length > MAX_CALL_CHARS) return null;
+      if (text.includes('MCP_RESULT')) return null; // bridge data, never a request
+      if (text.length > CALL_PROSE_CHARS && !CALL_SHAPE.test(text.trimStart())) return null;
+      const index = textIndex(el);
+      const parts = callParts(index.text);
+      if (parts.length) return { el, index, parts };
+    }
+    return null;
+  }
+
+  /** Hides exactly the call JSON of an inline element; a range an earlier pass wrapped is left alone. */
+  function hideInline({ index, parts }) {
+    for (let i = parts.length - 1; i >= 0; i -= 1) {
+      const range = toRawRange(index, parts[i]);
+      const at = locate(index, range.start);
+      if (at?.node.parentElement?.closest(`[${HIDDEN_ATTR}]`)) continue;
+      wrapRange(index, range);
+    }
+  }
+
   /** Hides a message that is nothing but generated text. Its text stays in the DOM. Null when it was hidden already. */
-  function hideMessage(el, whole = true) {
-    const target = messageElement(el, whole);
+  function hideMessage(el) {
+    const target = messageElement(el);
     if (target.hasAttribute(MESSAGE_ATTR)) return null;
     try { target.setAttribute(DISPLAY_ATTR, JSON.stringify({ value: target.style.getPropertyValue('display'), priority: target.style.getPropertyPriority('display') })); } catch { /* noop */ }
     target.setAttribute(MESSAGE_ATTR, '1');
@@ -618,12 +676,14 @@
     }
   }
 
-  /** The line(s) a call leaves while it runs; the result's line replaces them when the result arrives. */
-  function addCallChips(target, text) {
+  /** One `running` line per call, before the element the call lives in (a whole message, or its block). */
+  function addCallChipsFor(target, calls) {
     if (!target.parentNode) return;
-    const calls = parsePureCalls(text, true);
-    if (!calls) return;
+    const seen = new Set();
     for (const call of calls) {
+      const key = `${call.server}\u0000${call.name}\u0000${call.json}`;
+      if (seen.has(key)) continue; // the same call seen through two text nodes of one element
+      seen.add(key);
       const line = addCallLine(call, target);
       pending.push({ ...line, target, server: call.server, name: call.name, at: Date.now() });
     }
@@ -684,7 +744,12 @@
     const root = element?.__raw ?? element; // ChatGPT's Proxy (see running())
     if (!root) return;
     const slug = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const inMessage = (entry) => entry.target === root || root.contains(entry.target) || entry.target.contains(root);
+    // A batch may render one call per block: the bridge reports the first block, but every block of that reply
+    // belongs to the same message — its line must be withdrawn too.
+    const messageOf = (node) => node.closest?.(`${MESSAGE_SEL}, ${ASSISTANT_SEL}`) ?? node;
+    const message = messageOf(root);
+    const inMessage = (entry) => entry.target === root || root.contains(entry.target) || entry.target.contains(root)
+      || (message !== root && messageOf(entry.target) === message);
     const wanted = call
       ? (entry) => slug(entry.server) === slug(call.server) && slug(entry.name) === slug(call.name)
       : () => true;
@@ -698,13 +763,68 @@
     }
   }
 
+  /** The lines that stand for an element (or a part of it) go with it when the element comes back. */
+  function forgetLines(target) {
+    for (const list of [chips, pending]) {
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const entry = list[i];
+        if (entry.target !== target && !target.contains(entry.target) && !entry.target.contains(target)) continue;
+        entry.animation?.cancel();
+        entry.chip.remove();
+        entry.detail.remove();
+        list.splice(i, 1);
+      }
+    }
+  }
+
+  /** Puts one hidden element back exactly as it was (a click on the setting, or a message the site replaced). */
+  function restoreMessage(el) {
+    let saved = null;
+    try { saved = JSON.parse(el.getAttribute(DISPLAY_ATTR) ?? 'null'); } catch { /* no saved value */ }
+    if (saved?.value) el.style.setProperty('display', saved.value, saved.priority || undefined);
+    else el.style.removeProperty('display');
+    el.removeAttribute(MESSAGE_ATTR);
+    el.removeAttribute(DISPLAY_ATTR);
+    forgetLines(el);
+  }
+
+  /** Takes one of our hidden spans out again, putting its content back in place. */
+  function unwrapSpan(span) {
+    const parent = span.parentNode;
+    if (!parent) return;
+    while (span.firstChild) parent.insertBefore(span.firstChild, span);
+    parent.removeChild(span);
+    parent.normalize?.(); // the two halves of a text node become one again
+  }
+
+  /**
+   * Keeps the hidden state honest while the option is on. A site re-renders its chat: it may wipe the inline
+   * `display` (React owns that attribute) or reuse an element for DIFFERENT content (virtualized lists, regenerate,
+   * history prepended). Without this, a wiped element shows the raw protocol again, and a reused one keeps an
+   * unrelated answer hidden forever — the compact line would be hiding the chat, not the bridge's text.
+   * So: no marker left → the element comes back; marker still there → it is hidden again.
+   */
+  function maintainHidden() {
+    for (const el of document.querySelectorAll?.(`[${MESSAGE_ATTR}]`) ?? []) {
+      if (!/mcp_call|MCP_RESULT/.test(el.textContent ?? '')) { restoreMessage(el); continue; }
+      if (el.style.getPropertyValue('display') !== 'none') el.style.setProperty('display', 'none', 'important');
+    }
+    // An inline call is hidden as a span INSIDE a visible message; it needs the same repair: a wiped display must
+    // not leave the JSON on screen (the scan skips its own spans), and a span whose text was replaced must not keep
+    // unrelated content hidden.
+    for (const span of document.querySelectorAll?.(`[${HIDDEN_ATTR}]`) ?? []) {
+      if (!/mcp_call|MCP_RESULT/.test(span.textContent ?? '')) { unwrapSpan(span); continue; }
+      if (span.style.getPropertyValue('display') !== 'none') span.style.setProperty('display', 'none', 'important');
+    }
+  }
+
   // ───────────────────────── Applying the plan ─────────────────────────
 
   /** Applies the plan to one message: hide the whole thing, or wrap the parts the extension wrote. */
-  function applyHidden({ el, index, ranges, call, whole }) {
+  function applyHidden({ el, index, ranges, call }) {
     // A pure call has no partial plan: its whole text is generated and disappears like a result.
     if (call || !remainingText(index.text, ranges).trim()) {
-      const target = hideMessage(el, call ? whole !== false : true);
+      const target = hideMessage(el);
       if (target && !call) addResultChips(target, index.text);
       return;
     }
@@ -721,26 +841,53 @@
   function running(element) {
     const root = element?.__raw ?? element; // ChatGPT hands its block-aware Proxy: hide needs the real node
     if (!enabled || !root || root.nodeType !== 1) return;
+    // The WHOLE reply, not only the block the adapter reported: one reply is one batch, and its calls may sit in
+    // several blocks (or beside a sentence). Walking the message covers every one of them.
+    const scope = root.closest(`${MESSAGE_SEL}, ${ASSISTANT_SEL}`) ?? root;
     const nodes = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       if (node.nodeValue.includes('mcp_call')) nodes.push(node);
     }
-    // Where each call's line goes, and the text to read its calls from: the message the adapter saw (a bubble
-    // above it may carry a timestamp), or the block itself when the scan hid only part of a longer reply.
-    const hosts = new Map();
+    // The line goes before the whole TURN, never inside it: the detail holds the call's JSON, and a site adapter
+    // reads a message's text to find calls — our own text must not look like a request. The message's own text
+    // supplies the calls (a batch may render one per block; the adapter reports only the first block).
+    const lineOf = (node) => {
+      let line = node.closest?.(`${MESSAGE_SEL}, ${ASSISTANT_SEL}`) ?? node;
+      for (let up = line.parentElement, depth = 0; up && depth < 4; up = up.parentElement, depth += 1) {
+        if (!up.matches?.(`${MESSAGE_SEL}, ${ASSISTANT_SEL}`)) break;
+        line = up; // the outermost wrapper that is still this message (the article around the bubble)
+      }
+      return line;
+    };
+    const lines = new Map(); // line element -> calls
+    const add = (line, calls) => {
+      if (!line || !calls.length) return;
+      const list = lines.get(line) ?? [];
+      list.push(...calls);
+      lines.set(line, list);
+    };
     for (const node of nodes) {
-      if (node.parentElement?.closest(`[${HIDDEN_ATTR}], [${CHIP_ATTR}], [${DETAIL_ATTR}]`)) continue;
-      const found = findTarget(node);
-      if (!found) continue;
+      if (node.parentElement?.closest(`[${CHIP_ATTR}], [${DETAIL_ATTR}]`)) continue;
+      const wrapped = node.parentElement?.closest(`[${HIDDEN_ATTR}]`);
+      const found = wrapped ? null : findTarget(node);
+      if (!found) {
+        const inline = findInline(node);
+        if (!inline) continue;
+        hideInline(inline); // already wrapped by the scan: a no-op
+        const block = inline.el.closest(CONTENT_SEL) ?? inline.el;
+        if (!block.parentNode || block.closest(`[${MESSAGE_ATTR}]`)) continue;
+        add(lineOf(block), inline.parts.flatMap((part) => part.calls));
+        continue;
+      }
       let host = null;
-      try { host = hideMessage(found.el, found.whole !== false); } catch { /* the next scan retries */ }
+      try { host = hideMessage(found.el); } catch { /* the next scan retries */ }
       host = host ?? found.el.closest(`[${MESSAGE_ATTR}]`) ?? found.el;
-      hosts.set(host, host.contains(root) || host === root ? root.textContent : host.textContent);
+      add(lineOf(host), callParts(host.textContent).flatMap((part) => part.calls));
     }
-    for (const [host, text] of hosts) {
-      if (pending.some((entry) => entry.target === host || host.contains(entry.target))) continue;
-      addCallChips(host, text);
+    for (const [line, calls] of lines) {
+      if (pending.some((entry) => entry.target === line || line.contains(entry.target))) continue;
+      addCallChipsFor(line, calls);
     }
   }
 
@@ -778,7 +925,7 @@
       if (el.id === HOST_ID) return null;
       // Our own lines carry the call's text (`mcp_call` in the detail). They are never messages: scanning them
       // would hide them and add another line — a loop that grew the chat without end.
-      if (el.closest(`[${CHIP_ATTR}], [${DETAIL_ATTR}]`)) return null;
+      if (el.closest(`[${CHIP_ATTR}], [${DETAIL_ATTR}], ${NOT_TEXT_SEL}`)) return null;
       // The editable itself is never touched: a draft keeps whatever it holds. UNLESS the editable (or a
       // container with an editable in it) IS a message element — some sites render sent messages in
       // role=textbox containers, and those must hide like any other message.
@@ -819,9 +966,9 @@
         // print blocks carry), hiding only the found block would leave an empty bubble behind: the message goes,
         // and every call in it leaves its `running` line when the bridge starts it.
         if (holder !== el && parsePureCalls(COLLAPSE(holder.textContent), true)) {
-          return { el: holder, index: textIndex(holder), ranges: [], call: true, whole: true };
+          return { el: holder, index: textIndex(holder), ranges: [], call: true };
         }
-        return { el, index, ranges: [], call: true, whole: isWholeMessage(holder, el) };
+        return { el, index, ranges: [], call: true };
       }
       el = el.parentElement;
     }
@@ -841,6 +988,7 @@
   /** One pass over the page: every message that carries the bridge's own text is cleaned up. */
   function scan() {
     if (!enabled) return;
+    maintainHidden(); // a site that wiped or reused a hidden element must not leave the chat broken
     pruneChips();
     refreshSelectors(); // the site's adapter (when there is one) contributes its own selectors to this pass
     let found;
@@ -852,7 +1000,12 @@
       const target = findTarget(node);
       if (target) {
         try { applyHidden(target); } catch { /* the DOM changed under us: the next scan retries */ }
-      } else if (climbExhausted && node.nodeValue.includes('MCP_RESULT')) {
+      } else if (!node.nodeValue.includes('MCP_RESULT')) {
+        // Not the whole element, but a call with prose beside it: only the JSON is bridge text. The line for it
+        // comes from core_bridge (see running()); the scan hides a call found in history.
+        const inline = findInline(node);
+        if (inline) { try { hideInline(inline); } catch { /* the next scan retries */ } }
+      } else if (climbExhausted) {
         // A RESULT the scan could not hide: the user is looking at bridge text that should have vanished.
         // Reported at most once every 8 s, through the reporter core_bridge wires to the panel.
         if (Date.now() - lastBlockedReport >= 8000) {
@@ -904,13 +1057,7 @@
       el.removeAttribute(MESSAGE_ATTR);
       el.removeAttribute(DISPLAY_ATTR);
     }
-    for (const span of document.querySelectorAll(`[${HIDDEN_ATTR}]`)) {
-      const parent = span.parentNode;
-      if (!parent) continue;
-      while (span.firstChild) parent.insertBefore(span.firstChild, span);
-      parent.removeChild(span);
-      parent.normalize?.(); // the two halves of a text node become one again
-    }
+    for (const span of document.querySelectorAll(`[${HIDDEN_ATTR}]`)) unwrapSpan(span);
   }
 
   /**
@@ -949,7 +1096,7 @@
    * element a message is, where hiding lands, whether the found text is the whole message, and the plan applied.
    * The page itself only ever calls `WMB.hide`.
    */
-  WMB.hideInternals = { findTarget, messageElement, hideMessage, isWholeMessage, applyHidden };
+  WMB.hideInternals = { findTarget, findInline, hideInline, messageElement, hideMessage, isWholeMessage, applyHidden };
 
   if (typeof document !== 'undefined') {
     // Lines left behind by a previous copy of this script (an extension reload): this instance owns none yet, and

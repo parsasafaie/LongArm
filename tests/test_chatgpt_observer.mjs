@@ -120,5 +120,14 @@ adapter.rescan();
 
 assert.equal(fired.length, 1, 'Bug 1 Fix: Executed element must NEVER re-fire on subsequent scans!');
 
+// Test 4: the compact line's detail holds the call's JSON — it is display, never a new call.
+const ownDetail = createPre(JSON.stringify({ mcp_call: { server: 'terminal', name: 'run_command', arguments: { command: 'echo new_call' } } }, null, 2));
+ownDetail.closest = (selector) => (String(selector).includes('data-wmb-detail') ? ownDetail : null);
+mockElements.push(ownDetail);
+adapter.rescan();
+context.Date.now = () => now + 8000;
+adapter.rescan();
+assert.equal(fired.length, 1, 'the extension’s own line/detail is not read as a call');
+
 unobserve();
 console.log('✔ test_chatgpt_observer: baseline indexing, execution, and duplicate suppression verification passed');

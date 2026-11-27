@@ -269,7 +269,7 @@ const RESULT = '[MCP_RESULT server="terminal" tool="run" status="ok"] 21:45 [/MC
   assert.ok(!hidden(message), 'the message stays: the AI’s own words are never hidden');
   assert.ok(hidden(block), 'the code block (header included) is what disappears');
   assert.ok(!hidden(prose), 'the prose stays');
-  assert.equal(chipsBefore(block).length, 1, 'the call block still leaves its running line');
+  assert.equal(chipsBefore(message).length, 1, 'the call still leaves its running line, above the message (never inside its text)');
 }
 
 // ───────────────────────── 4. Never touched ─────────────────────────

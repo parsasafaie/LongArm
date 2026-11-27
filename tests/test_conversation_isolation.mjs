@@ -54,7 +54,7 @@ const claudeShell = (thread) => `<!doctype html><html><body><main><div class="th
 <fieldset><div contenteditable="true" class="ProseMirror"></div></fieldset></body></html>`;
 
 /** One page load. `storage` is the sessionStorage shared across reloads of the SAME tab. */
-function load(storage, { url = 'https://chatgpt.com/c/chat-a', history = '', onCall, site = 'chatgpt', autoSend = true, permission = 'allow', bridgeEnabled = true, setup, claims = null } = {}) {
+function load(storage, { url = 'https://chatgpt.com/c/chat-a', history = '', onCall, site = 'chatgpt', autoSend = true, permission = 'allow', bridgeEnabled = true, hideProtocol = false, setup, claims = null } = {}) {
   const claude = site === 'claude';
   const dom = new JSDOM(claude ? claudeShell(history) : shell(history), { url });
   const { window } = dom;
@@ -88,7 +88,7 @@ function load(storage, { url = 'https://chatgpt.com/c/chat-a', history = '', onC
       id: 'ext',
       onMessage: { addListener: () => {} },
       sendMessage: async (m) => {
-        if (m.type === 'GET_STATE') return { ok: true, epoch: 1, settings: { bridgeEnabled, autoSend, maxResultChars: 12000, hideProtocol: false, focusFallback: false }, servers };
+        if (m.type === 'GET_STATE') return { ok: true, epoch: 1, settings: { bridgeEnabled, autoSend, maxResultChars: 12000, hideProtocol, focusFallback: false }, servers };
         if (m.type === 'GET_ACTIVE_TOOLS') return { ok: true, tools, guides: {} };
         if (m.type === 'CLAIM_CALL') {
           if (!claims) return { ok: true, fresh: true };
@@ -1045,6 +1045,26 @@ scenario(41, async () => {
   assert.deepEqual(page.ran, ['echo BARE_A', 'echo FENCED_B'], 'both calls run exactly once');
   assert.equal(page.sent.length, 1, 'one result message');
   assert.equal((page.sent[0].match(/\[MCP_RESULT/g) ?? []).length, 2, 'the fenced call is not answered twice');
+  page.stop();
+});
+
+// ───────────── 42. Compact on: the extension's own line is never read as a second call ─────────────
+// The compact line's detail holds the call's JSON right beside the message. Reading a message's text must not
+// see it: a base adapter used to find the same call again (as a new call index) and RUN it a second time.
+scenario(42, async () => {
+  const storage = {};
+  const page = load(storage, { site: 'claude', url: 'https://claude.ai/chat/a', history: claudeTurn('user', '<p>check</p>'), hideProtocol: true });
+  await wait(2600);
+  page.adapter.markActivity();
+  page.append(claudeTurn('assistant', `<p>Let me check: ${JSON.stringify(call('LONGARM_OWN_LINE'))}</p>`));
+  await wait(2400);
+  await scan(page, 10);
+  assert.deepEqual(page.ran, ['LONGARM_OWN_LINE'], 'the inline call runs once');
+  assert.ok(page.doc.querySelector('[data-wmb-detail]'), 'its compact line is on the page');
+  await wait(2600);
+  await scan(page, 10);
+  assert.deepEqual(page.ran, ['LONGARM_OWN_LINE'], 'the line’s own JSON is not a second call');
+  assert.equal(page.sent.length, 1, 'and its one result is delivered once');
   page.stop();
 });
 

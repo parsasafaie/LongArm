@@ -17,6 +17,7 @@ const TESTS = [
   'tests/test_prompt.mjs',
   'tests/test_background.mjs',
   'tests/test_hide_dom.mjs',
+  'tests/test_hide_compact.mjs',
   'tests/test_registry.mjs',
   'tests/test_ws_client.mjs',
   'tests/test_ui_widget.mjs',

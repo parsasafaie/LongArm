@@ -63,10 +63,14 @@
     });
   }
 
+  /** The compact view's own nodes: their text is display, never a request. */
+  const OWN_NODES = '[data-wmb-chip], [data-wmb-detail]';
+
   /** Is it an assistant element (not the user's, not the form's, not a writing block) with a real MCP call? */
   function isCallElement(el) {
     const raw = el.textContent || '';
     return raw.includes('mcp_call') && !raw.includes('<server>')
+      && !el.closest(OWN_NODES) // hide.js's line/detail holds the call's JSON: it is not a new call
       && !el.closest(USER_SEL) && !el.querySelector(USER_SEL) && !el.closest('form')
       // A result the extension wrote is data: a call inside it is never a new request.
       && !WMB.isBridgeMessage?.(raw)
@@ -538,7 +542,7 @@
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         if (!/mcp_call|"server"\s*:/.test(node.nodeValue) || node.nodeValue.includes('<server>')) continue;
         let el = node.parentElement;
-        if (!el || el.closest(USER_SEL) || el.closest('form') || el.closest('[contenteditable="true"]')) continue;
+        if (!el || el.closest(OWN_NODES) || el.closest(USER_SEL) || el.closest('form') || el.closest('[contenteditable="true"]')) continue;
         for (let depth = 0; el && depth < 10 && el !== document.body && el.tagName !== 'MAIN'; depth += 1, el = el.parentElement) {
           if (el.querySelector(USER_SEL)) break;
           if (!isCallElement(el)) continue;

@@ -2,6 +2,7 @@
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -13,6 +14,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BRIDGE = str(ROOT / "server/mcp_ws_bridge.py")
+# Read from the bridge itself: the version is bumped there every release, and a hardcoded copy here only
+# went stale and failed the release check.
+VERSION = re.search(r'^VERSION = "([^"]+)"', Path(BRIDGE).read_text(encoding="utf-8"), re.M).group(1)
 FIXTURE = str(ROOT / "tests/fixtures/test_mcp_server.py")
 CONTROL = 18799
 EXTENSION_ID = "ilnjjdjoklladplnidbfmcjgalkmigjn"  # pinned by manifest.json `key`
@@ -76,7 +80,7 @@ def main():
             assert set(found) == {"one", "two"} and all(s["status"] == "listening" for s in found.values()), found
             assert found["one"]["url"] == "ws://127.0.0.1:18771", found
             info = call("GET", "/servers")[1]
-            assert info["config_error"] is None and info["version"] == "0.2.0", info
+            assert info["config_error"] is None and info["version"] == VERSION, info
 
             # A website can NOT read or shut down the bridge
             assert call("GET", "/servers", origin="https://chatgpt.com")[0] == 403

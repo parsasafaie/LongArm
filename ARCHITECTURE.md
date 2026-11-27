@@ -266,13 +266,23 @@ message, and removed at once when the bridge reports that the call will get no r
 placeholder, a failed delivery, a conversation that moved on). The result's line replaces the running
 one (matched by server and tool, by the tool alone for a wrong-server notice, and only within the same
 tree), so one call never leaves two lines. Clicking a line (or Enter) opens that line's own detail right
-under it — never its neighbours' — and clicking again tucks it away. The line and its detail are the
-extension's own nodes and are never scanned as messages (the detail holds the call's `mcp_call`; treating
-it as a call would add another line on every pass); lines whose message the site re-rendered away are
-pruned on the next pass, and a `running` line whose result never arrives says `no result` after the
-queue's own 10-minute bound. A message whose blocks are all calls is hidden whole, so a batch never
-leaves an empty bubble behind. A call is no longer assumed to be short: past 8 000 characters only
-call-shaped text is indexed, and 128 KB is the hard bound.
+under it — never its neighbours' — and clicking again tucks it away. The line sits before the whole
+TURN, outside the message element: the detail holds the call's `mcp_call`, and an adapter that reads a
+message's text to find calls must never see it as a new request (the ChatGPT scan also skips these
+nodes explicitly). The line and its detail are the extension's own nodes and are never scanned as
+messages (treating the detail as a call would add another line on every pass); lines whose message the
+site re-rendered away are pruned on the next pass, and a `running` line whose result never arrives says
+`no result` after the queue's own 10-minute bound. A message whose blocks are all calls is hidden
+whole, so a batch never leaves an empty bubble behind, and its lines come from the whole reply, so a
+reply rendered as several blocks still gets one per call. A reply that puts its calls BESIDE a sentence
+(the protocol forbids it, but models do it and the parser runs them) hides only the JSON ranges and
+keeps the sentence; a wrapper that adds a paragraph is never hidden whole, however short the prose. A
+screen-reader label (`.sr-only`, `[hidden]`) is small print, not content: it never keeps a turn from
+being hidden, and script/style text is never indexed. The scan also repairs what a site's re-render can
+break: an element whose inline `display` was wiped is hidden again, and one whose text no longer
+carries a marker (a virtualized list reusing the node, a regenerate) is put back with its lines
+removed — compact mode must never keep an unrelated answer hidden. A call is no longer assumed to be
+short: past 8 000 characters only call-shaped text is indexed, and 128 KB is the hard bound.
 
 Two site-shaped details it handles: a **label in front of the user's sent text** (Gemini renders
 `You said [MCP_RESULT …]…` — a message that is a user turn, starts within 32 chars with the wrapper
